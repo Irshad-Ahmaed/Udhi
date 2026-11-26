@@ -54,7 +54,7 @@ const GEOMETRIC_ANIMATE_ATTRS = new Set([
   "d",
   "points",
 ]);
-const VIEWBOX_TOLERANCE = 2;
+const VIEWBOX_TOLERANCE = 0.5;
 
 /**
  * Extracts the complete outer <svg>...</svg> markup using tag-depth scanning
@@ -965,6 +965,8 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
   const minAllowedY = vbY - VIEWBOX_TOLERANCE;
 
   const violations: string[] = [];
+  const headerTexts: BBox[] = [];
+  const diagramShapes: Array<{ tag: string; box: BBox }> = [];
 
   const traverse = (node: Node, parentMatrix: Matrix2D) => {
     if (node.nodeType !== 1) return;
@@ -992,6 +994,17 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
               `<${tag}> bounds [${box.minX.toFixed(1)}, ${box.minY.toFixed(1)}, ${box.maxX.toFixed(1)}, ${box.maxY.toFixed(1)}] exceed viewBox [${vbX}, ${vbY}, ${vbX + vbW}, ${vbY + vbH}]`,
             );
           }
+
+          if (tag === "text" && box.maxY <= vbY + vbH * 0.22) {
+            headerTexts.push(box);
+          } else if (GEOMETRY_TAGS.has(tag)) {
+            const w = box.maxX - box.minX;
+            const h = box.maxY - box.minY;
+            const isBackgroundCard = w >= vbW * 0.72 && h >= vbH * 0.5;
+            if (!isBackgroundCard) {
+              diagramShapes.push({ tag, box });
+            }
+          }
         }
       } catch (err) {
         violations.push(
@@ -1006,6 +1019,30 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
   };
 
   traverse(svgEl, IDENTITY_MATRIX);
+
+  // Catch oversized diagram geometry crashing into header titles (while allowing header card/badge <rect>s)
+  for (const shape of diagramShapes) {
+    const sw = shape.box.maxX - shape.box.minX;
+    const sh = shape.box.maxY - shape.box.minY;
+    if (sw < 48 && sh < 48) continue;
+    const isHeaderCardRect =
+      shape.tag === "rect" && shape.box.maxY <= vbY + vbH * 0.26;
+    if (isHeaderCardRect) continue;
+
+    for (const hBox of headerTexts) {
+      const overlaps =
+        shape.box.minX < hBox.maxX &&
+        shape.box.maxX > hBox.minX &&
+        shape.box.minY < hBox.maxY &&
+        shape.box.maxY > hBox.minY;
+      if (overlaps) {
+        violations.push(
+          `<${shape.tag}> [${shape.box.minX.toFixed(0)}, ${shape.box.minY.toFixed(0)}, ${shape.box.maxX.toFixed(0)}, ${shape.box.maxY.toFixed(0)}] overlaps header text`,
+        );
+        break;
+      }
+    }
+  }
 
   if (violations.length > 0) {
     return {

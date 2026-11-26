@@ -39,20 +39,32 @@ function formatGeminiError(err: unknown): string {
   return typeof err === "string" ? err : "Unknown Gemini API error";
 }
 
+function getConceptSizingHint(concept: Concept): string {
+  switch (concept.id) {
+    case "pythagoras":
+      return "Sizing tip: Use a compact 3-4-5 right triangle (e.g. a=60, b=80, c=100) with the right angle at bottom-left around (120, 260), top vertex at (120, 200), and bottom-right vertex at (200, 260). Draw ALL three squares OUTWARD from the triangle (never overlapping inside it): a² to the left [60..120, 200..260], b² below [120..200, 260..340], and c² outward up-right from the hypotenuse (vertices (120,200)-(200,260)-(260,180)-(180,120)), leaving x: 290..565 clear for any key-formula panel.";
+    case "circle-parts":
+      return "Sizing tip: Keep the circle radius <= 95px centered around (190, 230) so labels around the circle never touch the header or right-hand panel.";
+    default:
+      return "Sizing tip: Keep the main diagram compact inside x: 35-565, y: 95-370 with generous padding from borders and zero text/shape overlaps.";
+  }
+}
+
 function buildInitialPrompt(concept: Concept): string {
   return [
     `Create one educational animated SVG diagram for UK GCSE ${concept.subject} students.`,
     `Concept: ${concept.name}`,
     `Explanation to illustrate: "${concept.promptText}"`,
     "",
-    "Strict technical requirements:",
+    "Strict technical & layout requirements:",
     '1. Return ONLY raw SVG markup starting with <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400"> and ending with </svg>. Do NOT include markdown fences or any prose.',
-    "2. Keep ALL shapes, paths, strokes, and text labels strictly inside the viewBox (keep all coordinates comfortably within x: 25..575 and y: 25..375 so nothing clips).",
-    "3. Include a descriptive <title> element AND at least 4 clear, readable <text> labels (including a visible diagram heading and labels for the key parts) with high contrast on a light (#ffffff or #f8fafc) background.",
-    "4. Include at least one meaningful, smooth CSS (@keyframes inside <style>) or SMIL (<animate>, <animateTransform>, or <animateMotion> with dur) animation that visually demonstrates the concept.",
-    "5. Use only self-contained SVG shapes and styles (no <script>, no event handlers, no <foreignObject>, no external URLs).",
-    "6. Do NOT write raw LaTeX ($...$ or \\text{...}) inside <text> elements—use plain Unicode characters (e.g. a² + b² = c², CO₂, H₂O, O₂, C₆H₁₂O₆, π, ×, →).",
-    "7. Never use HTML named entities like &pi;, &times;, &deg;, or &rarr; (SVG XML only allows &amp;, &lt;, &gt;, &quot;, &apos;), and never put unescaped '&' inside <style> or <text>. Keep all shapes below y = 85 so nothing overlaps the title/subtitle header.",
+    "2. Reserve y: 15..78 strictly for the title/subtitle header. Keep ALL diagram shapes, squares, circles, arrows, and labels inside x: 35..565 and y: 90..370 (at least 25px margin from viewBox edges, never entering y < 85 or overlapping header text or side panels).",
+    `3. ${getConceptSizingHint(concept)}`,
+    "4. Include a descriptive <title> element AND at least 4 clear, readable <text> labels (including a visible diagram heading and labels for the key parts) with high contrast on a light (#ffffff or #f8fafc) background.",
+    "5. Include at least one meaningful, smooth CSS (@keyframes inside <style>) or SMIL (<animate>, <animateTransform>, or <animateMotion> with dur) animation that visually demonstrates the concept.",
+    "6. Use only self-contained SVG shapes and styles (no <script>, no event handlers, no <foreignObject>, no external URLs, no CSS @import).",
+    "7. Do NOT write raw LaTeX ($...$ or \\text{...}) inside <text> elements—use plain Unicode characters (e.g. a² + b² = c², CO₂, H₂O, O₂, C₆H₁₂O₆, π, ×, →).",
+    "8. Never use HTML named entities like &pi;, &times;, &deg;, or &rarr; (SVG XML only allows &amp;, &lt;, &gt;, &quot;, &apos;), and never put unescaped '&' inside <style> or <text>.",
   ].join("\n");
 }
 
@@ -79,12 +91,12 @@ function buildRetryPrompt(
     "",
     "Fix ALL of the issues above and return ONLY valid raw SVG markup:",
     '- Must start with <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400"> and end with </svg> (no markdown fences).',
-    "- Every shape, path, and <text> label must fit cleanly inside x: 25..575, y: 25..375.",
+    "- Keep ALL diagram shapes, squares, circles, and labels compact inside x: 35..565, y: 90..370 (never overlap y < 85 header text or clip near y = 400).",
+    `- ${getConceptSizingHint(concept)}`,
     "- Include a non-empty <title> element and at least 3 readable <text> labels.",
     "- Include a working SMIL animation (<animate>/<animateTransform>/<animateMotion> with dur) or CSS @keyframes animation referenced by an element.",
-    "- Include at least 3 geometric shapes and no <script> or external URLs.",
+    "- Include at least 3 geometric shapes and no <script>, CSS @import, or external URLs.",
     "- Do NOT write raw LaTeX ($...$) or HTML entities (&pi;, &times;, &rarr;); use plain Unicode (π, ×, →, ², ₂) and '&amp;' for ampersands.",
-    "- Keep shapes below y = 85 so nothing overlaps the header.",
     "",
     "Previous SVG for reference:",
     truncatedPrev,
