@@ -137,4 +137,42 @@ describe("validateSvg", () => {
     const res = validateSvg(withScript);
     assert.equal(res.checks.find((c) => c.id === "safe_and_substantial")?.passed, false);
   });
+
+  it("handles <text> with positioned <tspan> and <use> referencing <defs>", () => {
+    const svgWithTspanAndUse = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Particles</title>
+  <defs>
+    <circle id="atom" cx="0" cy="0" r="10" fill="#2563eb" />
+  </defs>
+  <use href="#atom" x="100" y="150" />
+  <use href="#atom" x="140" y="150" />
+  <use href="#atom" x="180" y="150" />
+  <text text-anchor="middle" font-size="14">
+    <tspan x="300" y="340">Line 1</tspan>
+    <tspan x="300" y="360">Line 2</tspan>
+  </text>
+  <text x="100" y="80">Solid</text>
+  <text x="300" y="80">Liquid</text>
+  <animateMotion path="M 0 0 L 20 0" dur="2s" />
+</svg>`;
+    const res = validateSvg(svgWithTspanAndUse);
+    assert.equal(res.passedAll, true, JSON.stringify(res.checks));
+  });
+
+  it("fails has_animation when SMIL dur is 0s", () => {
+    const zeroDur = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Zero dur</title>
+  <rect x="20" y="20" width="80" height="80" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="0s" />
+</svg>`;
+    const res = validateSvg(zeroDur);
+    assert.equal(res.checks.find((c) => c.id === "has_animation")?.passed, false);
+  });
 });

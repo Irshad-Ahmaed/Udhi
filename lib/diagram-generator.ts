@@ -107,7 +107,15 @@ async function callGeminiWithBackoff(
         contents: prompt,
       });
 
-      const text = response.text ?? "";
+      const rawText = response.text ?? "";
+      const finishReason = response.candidates?.[0]?.finishReason;
+      const text =
+        rawText.trim().length > 0
+          ? rawText
+          : finishReason
+            ? `<!-- empty response: finishReason=${finishReason} -->`
+            : "";
+
       const usage = response.usageMetadata;
       const inputTokens = usage?.promptTokenCount ?? 0;
       const candidatesTokens = usage?.candidatesTokenCount ?? 0;

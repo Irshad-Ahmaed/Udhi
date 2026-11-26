@@ -306,7 +306,58 @@ function computePathBBox(d: string): BBox | null {
   return { minX, minY, maxX, maxY };
 }
 
-function getElementLocalBBox(el: Element): BBox | null {
+function getVisibleTextContent(el: Element): string {
+  let out = "";
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType === 3 || child.nodeType === 4) {
+      out += child.nodeValue ?? "";
+    } else if (child.nodeType === 1) {
+      const childEl = child as Element;
+      const childTag = childEl.tagName.toLowerCase();
+      if (childTag !== "title" && childTag !== "desc") {
+        out += getVisibleTextContent(childEl);
+      }
+    }
+  }
+  return out;
+}
+
+function unionBBoxes(boxes: BBox[]): BBox | null {
+  if (boxes.length === 0) return null;
+  return {
+    minX: Math.min(...boxes.map((b) => b.minX)),
+    minY: Math.min(...boxes.map((b) => b.minY)),
+    maxX: Math.max(...boxes.map((b) => b.maxX)),
+    maxY: Math.max(...boxes.map((b) => b.maxY)),
+  };
+}
+
+function estimateTextSpanBBox(
+  textStr: string,
+  x: number,
+  y: number,
+  fontSize: number,
+  anchor: string,
+): BBox {
+  const estWidth = textStr.length * fontSize * 0.52;
+  let minX = x;
+  if (anchor === "middle") minX = x - estWidth / 2;
+  else if (anchor === "end") minX = x - estWidth;
+
+  return {
+    minX,
+    maxX: minX + estWidth,
+    minY: y - fontSize * 0.85,
+    maxY: y + fontSize * 0.25,
+  };
+}
+
+function getElementLocalBBox(
+  el: Element,
+  idMap: Map<string, Element>,
+  visitedIds = new Set<string>(),
+): BBox | null {
   const tag = el.tagName.toLowerCase();
   const pad = getStrokePadding(el);
   let box: BBox | null = null;
@@ -363,31 +414,88 @@ function getElementLocalBBox(el: Element): BBox | null {
   } else if (tag === "path") {
     const d = el.getAttribute("d");
     if (d) box = computePathBBox(d);
+  } else if (tag === "use") {
+    const href = (
+      el.getAttribute("href") ??
+      el.getAttribute("xlink:href") ??
+      ""
+    ).trim();
+    const ux = parseNumber(el.getAttribute("x"), 0);
+    const uy = parseNumber(el.getAttribute("y"), 0);
+    if (href.startsWith("#")) {
+      const targetId = href.slice(1);
+      const target = idMap.get(targetId);
+      if (target && !visitedIds.has(targetId)) {
+        visitedIds.add(targetId);
+        const targetBox = getSubtreeBBox(target, idMap, visitedIds);
+        visitedIds.delete(targetId);
+        if (targetBox) {
+          box = {
+            minX: targetBox.minX + ux,
+            minY: targetBox.minY + uy,
+            maxX: targetBox.maxX + ux,
+            maxY: targetBox.maxY + uy,
+          };
+        }
+      }
+    }
+    if (!box && (el.getAttribute("x") !== null || el.getAttribute("y") !== null)) {
+      box = { minX: ux, minY: uy, maxX: ux, maxY: uy };
+    }
   } else if (tag === "text") {
-    const content = (el.textContent ?? "").trim();
-    if (!content) return null;
-    const x = parseNumber(el.getAttribute("x"), 0);
-    const y = parseNumber(el.getAttribute("y"), 0);
+    const parentX = parseNumber(el.getAttribute("x"), 0);
+    const parentY = parseNumber(el.getAttribute("y"), 0);
     const fontSizeRaw =
       el.getAttribute("font-size") ?? getInlineStyleValue(el, "font-size");
-    const fontSize = Math.max(6, parseNumber(fontSizeRaw, 14));
-    const anchor = (
+    const parentFontSize = Math.max(6, parseNumber(fontSizeRaw, 14));
+    const parentAnchor = (
       el.getAttribute("text-anchor") ??
       getInlineStyleValue(el, "text-anchor") ??
       "start"
     ).toLowerCase();
-    const estWidth = content.length * fontSize * 0.52;
-    let minX = x;
-    if (anchor === "middle") minX = x - estWidth / 2;
-    else if (anchor === "end") minX = x - estWidth;
 
-    box = {
-      minX,
-      maxX: minX + estWidth,
-      minY: y - fontSize * 0.85,
-      maxY: y + fontSize * 0.25,
-    };
-    return box;
+    const tspans: Element[] = [];
+    for (let i = 0; i < el.childNodes.length; i++) {
+      const child = el.childNodes[i];
+      if (child.nodeType === 1 && (child as Element).tagName.toLowerCase() === "tspan") {
+        tspans.push(child as Element);
+      }
+    }
+
+    const hasPositionedTspans = tspans.some(
+      (ts) => ts.getAttribute("x") !== null || ts.getAttribute("y") !== null,
+    );
+
+    if (hasPositionedTspans) {
+      const spanBoxes: BBox[] = [];
+      let curX = parentX;
+      let curY = parentY;
+      for (const ts of tspans) {
+        const content = getVisibleTextContent(ts).trim();
+        const tx =
+          ts.getAttribute("x") !== null ? parseNumber(ts.getAttribute("x"), curX) : curX;
+        const ty =
+          ts.getAttribute("y") !== null ? parseNumber(ts.getAttribute("y"), curY) : curY;
+        const tsFontRaw =
+          ts.getAttribute("font-size") ?? getInlineStyleValue(ts, "font-size");
+        const fs = tsFontRaw ? Math.max(6, parseNumber(tsFontRaw, parentFontSize)) : parentFontSize;
+        const anchor = (
+          ts.getAttribute("text-anchor") ??
+          getInlineStyleValue(ts, "text-anchor") ??
+          parentAnchor
+        ).toLowerCase();
+        if (content) {
+          spanBoxes.push(estimateTextSpanBBox(content, tx, ty, fs, anchor));
+        }
+        curX = tx;
+        curY = ty;
+      }
+      return unionBBoxes(spanBoxes);
+    }
+
+    const content = getVisibleTextContent(el).trim();
+    if (!content) return null;
+    return estimateTextSpanBBox(content, parentX, parentY, parentFontSize, parentAnchor);
   }
 
   if (!box) return null;
@@ -397,6 +505,31 @@ function getElementLocalBBox(el: Element): BBox | null {
     maxX: box.maxX + pad,
     maxY: box.maxY + pad,
   };
+}
+
+function getSubtreeBBox(
+  el: Element,
+  idMap: Map<string, Element>,
+  visitedIds: Set<string>,
+): BBox | null {
+  const tag = el.tagName.toLowerCase();
+  const matrix = parseTransform(el.getAttribute("transform"));
+
+  if (tag !== "g" && tag !== "svg") {
+    const local = getElementLocalBBox(el, idMap, visitedIds);
+    return local ? transformBBox(local, matrix) : null;
+  }
+
+  const childBoxes: BBox[] = [];
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const child = el.childNodes[i];
+    if (child.nodeType === 1) {
+      const b = getSubtreeBBox(child as Element, idMap, visitedIds);
+      if (b) childBoxes.push(b);
+    }
+  }
+  const union = unionBBoxes(childBoxes);
+  return union ? transformBBox(union, matrix) : null;
 }
 
 function collectElements(root: Element): Element[] {
@@ -439,6 +572,12 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
     };
   }
 
+  const idMap = new Map<string, Element>();
+  for (const el of collectElements(svgEl)) {
+    const id = el.getAttribute("id");
+    if (id) idMap.set(id, el);
+  }
+
   const maxAllowedX = vbX + vbW + VIEWBOX_TOLERANCE;
   const maxAllowedY = vbY + vbH + VIEWBOX_TOLERANCE;
   const minAllowedX = vbX - VIEWBOX_TOLERANCE;
@@ -459,7 +598,7 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
 
     if (tag !== "svg" && tag !== "g") {
       try {
-        const local = getElementLocalBBox(el);
+        const local = getElementLocalBBox(el, idMap);
         if (local) {
           const box = transformBBox(local, currentMatrix);
           if (
@@ -512,7 +651,7 @@ function checkTitleAndLabels(elements: Element[]): {
   const textLabels = elements.filter(
     (el) =>
       el.tagName.toLowerCase() === "text" &&
-      (el.textContent ?? "").trim().length > 0,
+      getVisibleTextContent(el).trim().length > 0,
   );
 
   if (titles.length === 0) {
@@ -534,6 +673,14 @@ function checkTitleAndLabels(elements: Element[]): {
   };
 }
 
+function hasPositiveDur(el: Element): boolean {
+  const dur = (el.getAttribute("dur") ?? "").trim().toLowerCase();
+  if (!dur) return false;
+  if (dur === "indefinite") return true;
+  const num = Number.parseFloat(dur);
+  return Number.isFinite(num) && num > 0;
+}
+
 function checkAnimation(elements: Element[]): {
   passed: boolean;
   message: string;
@@ -541,14 +688,14 @@ function checkAnimation(elements: Element[]): {
   const smilAnims = elements.filter((el) => {
     const tag = el.tagName.toLowerCase();
     if (tag === "animatemotion") {
-      const hasDur = Boolean(el.getAttribute("dur"));
+      const hasDur = hasPositiveDur(el);
       const hasPath =
         Boolean(el.getAttribute("path")) ||
         collectElements(el).some((c) => c.tagName.toLowerCase() === "mpath");
       return hasDur && hasPath;
     }
     if (tag === "animate" || tag === "animatetransform" || tag === "set") {
-      return Boolean(el.getAttribute("attributeName")) && Boolean(el.getAttribute("dur"));
+      return Boolean(el.getAttribute("attributeName")) && hasPositiveDur(el);
     }
     return false;
   });
@@ -580,7 +727,8 @@ function checkAnimation(elements: Element[]): {
     const animPropRegex = /animation(?:-name)?\s*:\s*([^;}{]+)/gi;
     let animMatch: RegExpExecArray | null;
     while ((animMatch = animPropRegex.exec(allCss)) !== null) {
-      const value = animMatch[1];
+      const value = animMatch[1].trim();
+      if (value.toLowerCase() === "none") continue;
       for (const name of keyframeNames) {
         if (new RegExp(`\\b${name}\\b`).test(value)) {
           return {
@@ -644,7 +792,7 @@ function checkSafeAndSubstantial(svgEl: Element): {
     const el = node as Element;
     const tag = el.tagName.toLowerCase();
     if (SKIPPED_CONTAINERS.has(tag)) return;
-    if (GEOMETRY_TAGS.has(tag)) shapeCount++;
+    if (GEOMETRY_TAGS.has(tag) || tag === "use") shapeCount++;
     for (let i = 0; i < el.childNodes.length; i++) {
       countShapes(el.childNodes[i]);
     }
