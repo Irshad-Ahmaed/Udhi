@@ -850,10 +850,23 @@ export function ReviewDashboard({
               </div>
               <button
                 type="button"
+                aria-label="Close modal"
                 onClick={() => setExpandedSvg(null)}
-                className="shrink-0 rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-950 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none"
               >
-                Esc
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  className="h-4 w-4"
+                >
+                  <path
+                    d="M4 4l8 8m0-8-8 8"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                  />
+                </svg>
               </button>
             </div>
 
