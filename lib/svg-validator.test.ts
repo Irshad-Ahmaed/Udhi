@@ -175,4 +175,24 @@ describe("validateSvg", () => {
     const res = validateSvg(zeroDur);
     assert.equal(res.checks.find((c) => c.id === "has_animation")?.passed, false);
   });
+
+  it("resolves CSS class text-anchor and font-size for within_viewbox", () => {
+    const cssClassText = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Centered via CSS class</title>
+  <style>
+    .centered { font-size: 11px; text-anchor: middle; }
+    .pulse { animation: fade 2s infinite; }
+    @keyframes fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+  <rect x="40" y="40" width="520" height="320" class="pulse" fill="none" stroke="#334155" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="100" y1="100" x2="200" y2="100" />
+  <text x="485" y="320" class="centered">Move fast in all directions</text>
+  <text x="100" y="320" class="centered">Close together</text>
+  <text x="300" y="80" class="centered">States of Matter</text>
+</svg>`;
+    const res = validateSvg(cssClassText);
+    assert.equal(res.passedAll, true, JSON.stringify(res.checks));
+  });
 });

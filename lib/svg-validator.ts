@@ -353,9 +353,83 @@ function estimateTextSpanBBox(
   };
 }
 
+interface CssStyleRule {
+  selector: string;
+  declarations: Record<string, string>;
+}
+
+function parseStyleRules(svgEl: Element): CssStyleRule[] {
+  const rules: CssStyleRule[] = [];
+  const styleText = collectElements(svgEl)
+    .filter((el) => el.tagName.toLowerCase() === "style")
+    .map((el) => (el.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, ""))
+    .join("\n");
+
+  // Strip @keyframes / @import / @media blocks before matching simple selector rules
+  const cleaned = styleText
+    .replace(/@[^{;]+;/g, "")
+    .replace(/@(?:-webkit-)?keyframes\s+[^{]+\{(?:[^{}]*\{[^}]*\})*[^}]*\}/gi, "");
+
+  const ruleRegex = /([^{}]+)\{([^{}]+)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = ruleRegex.exec(cleaned)) !== null) {
+    const selectors = match[1]
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const decls: Record<string, string> = {};
+    for (const part of match[2].split(";")) {
+      const idx = part.indexOf(":");
+      if (idx === -1) continue;
+      const prop = part.slice(0, idx).trim().toLowerCase();
+      const val = part.slice(idx + 1).trim();
+      if (prop && val) decls[prop] = val;
+    }
+    for (const selector of selectors) {
+      rules.push({ selector, declarations: decls });
+    }
+  }
+  return rules;
+}
+
+function resolveCssProp(
+  el: Element,
+  prop: string,
+  cssRules: CssStyleRule[],
+): string | null {
+  const inlineVal = getInlineStyleValue(el, prop);
+  if (inlineVal !== null) return inlineVal;
+
+  const attrVal = el.getAttribute(prop);
+  if (attrVal && attrVal.trim() !== "") return attrVal;
+
+  const tag = el.tagName.toLowerCase();
+  const id = el.getAttribute("id")?.trim();
+  const classes = (el.getAttribute("class") ?? "")
+    .split(/\s+/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  let matched: string | null = null;
+  for (const rule of cssRules) {
+    const val = rule.declarations[prop];
+    if (!val) continue;
+    const sel = rule.selector;
+    if (sel === tag) {
+      matched = val;
+    } else if (sel.startsWith(".") && classes.includes(sel.slice(1))) {
+      matched = val;
+    } else if (id && sel === `#${id}`) {
+      matched = val;
+    }
+  }
+  return matched;
+}
+
 function getElementLocalBBox(
   el: Element,
   idMap: Map<string, Element>,
+  cssRules: CssStyleRule[],
   visitedIds = new Set<string>(),
 ): BBox | null {
   const tag = el.tagName.toLowerCase();
@@ -427,7 +501,7 @@ function getElementLocalBBox(
       const target = idMap.get(targetId);
       if (target && !visitedIds.has(targetId)) {
         visitedIds.add(targetId);
-        const targetBox = getSubtreeBBox(target, idMap, visitedIds);
+        const targetBox = getSubtreeBBox(target, idMap, cssRules, visitedIds);
         visitedIds.delete(targetId);
         if (targetBox) {
           box = {
@@ -439,19 +513,16 @@ function getElementLocalBBox(
         }
       }
     }
-    if (!box && (el.getAttribute("x") !== null || el.getAttribute("y") !== null)) {
+    if (!box && (el.hasAttribute("x") || el.hasAttribute("y"))) {
       box = { minX: ux, minY: uy, maxX: ux, maxY: uy };
     }
   } else if (tag === "text") {
     const parentX = parseNumber(el.getAttribute("x"), 0);
     const parentY = parseNumber(el.getAttribute("y"), 0);
-    const fontSizeRaw =
-      el.getAttribute("font-size") ?? getInlineStyleValue(el, "font-size");
+    const fontSizeRaw = resolveCssProp(el, "font-size", cssRules);
     const parentFontSize = Math.max(6, parseNumber(fontSizeRaw, 14));
     const parentAnchor = (
-      el.getAttribute("text-anchor") ??
-      getInlineStyleValue(el, "text-anchor") ??
-      "start"
+      resolveCssProp(el, "text-anchor", cssRules) ?? "start"
     ).toLowerCase();
 
     const tspans: Element[] = [];
@@ -463,7 +534,7 @@ function getElementLocalBBox(
     }
 
     const hasPositionedTspans = tspans.some(
-      (ts) => ts.getAttribute("x") !== null || ts.getAttribute("y") !== null,
+      (ts) => ts.hasAttribute("x") || ts.hasAttribute("y"),
     );
 
     if (hasPositionedTspans) {
@@ -472,17 +543,16 @@ function getElementLocalBBox(
       let curY = parentY;
       for (const ts of tspans) {
         const content = getVisibleTextContent(ts).trim();
-        const tx =
-          ts.getAttribute("x") !== null ? parseNumber(ts.getAttribute("x"), curX) : curX;
-        const ty =
-          ts.getAttribute("y") !== null ? parseNumber(ts.getAttribute("y"), curY) : curY;
-        const tsFontRaw =
-          ts.getAttribute("font-size") ?? getInlineStyleValue(ts, "font-size");
+        const tx = ts.hasAttribute("x")
+          ? parseNumber(ts.getAttribute("x"), curX)
+          : curX;
+        const ty = ts.hasAttribute("y")
+          ? parseNumber(ts.getAttribute("y"), curY)
+          : curY;
+        const tsFontRaw = resolveCssProp(ts, "font-size", cssRules);
         const fs = tsFontRaw ? Math.max(6, parseNumber(tsFontRaw, parentFontSize)) : parentFontSize;
         const anchor = (
-          ts.getAttribute("text-anchor") ??
-          getInlineStyleValue(ts, "text-anchor") ??
-          parentAnchor
+          resolveCssProp(ts, "text-anchor", cssRules) ?? parentAnchor
         ).toLowerCase();
         if (content) {
           spanBoxes.push(estimateTextSpanBBox(content, tx, ty, fs, anchor));
@@ -510,13 +580,14 @@ function getElementLocalBBox(
 function getSubtreeBBox(
   el: Element,
   idMap: Map<string, Element>,
+  cssRules: CssStyleRule[],
   visitedIds: Set<string>,
 ): BBox | null {
   const tag = el.tagName.toLowerCase();
   const matrix = parseTransform(el.getAttribute("transform"));
 
   if (tag !== "g" && tag !== "svg") {
-    const local = getElementLocalBBox(el, idMap, visitedIds);
+    const local = getElementLocalBBox(el, idMap, cssRules, visitedIds);
     return local ? transformBBox(local, matrix) : null;
   }
 
@@ -524,7 +595,7 @@ function getSubtreeBBox(
   for (let i = 0; i < el.childNodes.length; i++) {
     const child = el.childNodes[i];
     if (child.nodeType === 1) {
-      const b = getSubtreeBBox(child as Element, idMap, visitedIds);
+      const b = getSubtreeBBox(child as Element, idMap, cssRules, visitedIds);
       if (b) childBoxes.push(b);
     }
   }
@@ -577,6 +648,7 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
     const id = el.getAttribute("id");
     if (id) idMap.set(id, el);
   }
+  const cssRules = parseStyleRules(svgEl);
 
   const maxAllowedX = vbX + vbW + VIEWBOX_TOLERANCE;
   const maxAllowedY = vbY + vbH + VIEWBOX_TOLERANCE;
@@ -598,7 +670,7 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
 
     if (tag !== "svg" && tag !== "g") {
       try {
-        const local = getElementLocalBBox(el, idMap);
+        const local = getElementLocalBBox(el, idMap, cssRules);
         if (local) {
           const box = transformBBox(local, currentMatrix);
           if (
