@@ -542,7 +542,7 @@ function getElementLocalBBox(
       let curX = parentX;
       let curY = parentY;
       for (const ts of tspans) {
-        const content = getVisibleTextContent(ts).trim();
+        const content = getVisibleTextContent(ts).replace(/\s+/g, " ").trim();
         const tx = ts.hasAttribute("x")
           ? parseNumber(ts.getAttribute("x"), curX)
           : curX;
@@ -563,7 +563,7 @@ function getElementLocalBBox(
       return unionBBoxes(spanBoxes);
     }
 
-    const content = getVisibleTextContent(el).trim();
+    const content = getVisibleTextContent(el).replace(/\s+/g, " ").trim();
     if (!content) return null;
     return estimateTextSpanBBox(content, parentX, parentY, parentFontSize, parentAnchor);
   }
@@ -670,7 +670,49 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
 
     if (tag !== "svg" && tag !== "g") {
       try {
-        const local = getElementLocalBBox(el, idMap, cssRules);
+        // Elements driven by child <animateMotion> follow the motion path, not static (0,0)
+        const motionChild = Array.from(el.childNodes).find(
+          (c) => c.nodeType === 1 && (c as Element).tagName.toLowerCase() === "animatemotion",
+        ) as Element | undefined;
+
+        let local: BBox | null = null;
+        if (motionChild) {
+          let motionPathD = motionChild.getAttribute("path");
+          if (!motionPathD) {
+            const mpath = Array.from(motionChild.childNodes).find(
+              (c) => c.nodeType === 1 && (c as Element).tagName.toLowerCase() === "mpath",
+            ) as Element | undefined;
+            const href = (
+              mpath?.getAttribute("href") ??
+              mpath?.getAttribute("xlink:href") ??
+              ""
+            ).trim();
+            if (href.startsWith("#")) {
+              const target = idMap.get(href.slice(1));
+              motionPathD =
+                target?.getAttribute("d") ??
+                resolveCssProp(target as Element, "d", cssRules)?.replace(/^path\(["']?|["']?\)$/g, "") ??
+                null;
+            }
+          }
+          const pathBox = motionPathD ? computePathBBox(motionPathD) : null;
+          const baseBox = getElementLocalBBox(el, idMap, cssRules);
+          if (pathBox && baseBox) {
+            const halfW = (baseBox.maxX - baseBox.minX) / 2;
+            const halfH = (baseBox.maxY - baseBox.minY) / 2;
+            local = {
+              minX: pathBox.minX - halfW,
+              minY: pathBox.minY - halfH,
+              maxX: pathBox.maxX + halfW,
+              maxY: pathBox.maxY + halfH,
+            };
+          } else {
+            local = pathBox;
+          }
+        } else {
+          local = getElementLocalBBox(el, idMap, cssRules);
+        }
+
         if (local) {
           const box = transformBBox(local, currentMatrix);
           if (
@@ -930,6 +972,15 @@ export function validateSvg(rawOutput: string): {
   }
 
   const parseErrors: string[] = [];
+  const withoutCommentsOrCdata = extracted
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
+  if (/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/.test(withoutCommentsOrCdata)) {
+    parseErrors.push(
+      "Unescaped '&' found outside XML comments or CDATA; replace with '&amp;' or 'and'.",
+    );
+  }
+
   const parser = new DOMParser({
     errorHandler: {
       warning: (msg: string) => parseErrors.push(msg),

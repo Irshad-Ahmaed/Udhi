@@ -9,15 +9,27 @@ interface SvgPreviewProps {
 
 function sanitizeSvgForPreview(rawSvg: string): string {
   try {
-    const doc = new window.DOMParser().parseFromString(rawSvg, "image/svg+xml");
-    if (doc.querySelector("parsererror")) {
+    let doc = new window.DOMParser().parseFromString(rawSvg, "image/svg+xml");
+    let svgEl: Element | null = doc.querySelector("parsererror")
+      ? null
+      : doc.documentElement;
+
+    if (!svgEl || svgEl.tagName.toLowerCase() !== "svg") {
+      // Fallback to HTML parser for SVGs with minor XML quirks (e.g., bare '&' in <style> comments)
+      const htmlDoc = new window.DOMParser().parseFromString(rawSvg, "text/html");
+      svgEl = htmlDoc.querySelector("svg");
+      doc = htmlDoc;
+    }
+
+    if (!svgEl || svgEl.tagName.toLowerCase() !== "svg") {
       return "";
     }
-    doc
-      .querySelectorAll("script, foreignObject")
+
+    svgEl
+      .querySelectorAll("script, foreignObject, foreignobject")
       .forEach((node) => node.remove());
 
-    doc.querySelectorAll("*").forEach((el) => {
+    svgEl.querySelectorAll("*").forEach((el) => {
       for (const attr of Array.from(el.attributes)) {
         const name = attr.name.toLowerCase();
         const val = attr.value.trim();
@@ -32,10 +44,7 @@ function sanitizeSvgForPreview(rawSvg: string): string {
       }
     });
 
-    const svgEl = doc.documentElement;
-    return svgEl?.tagName.toLowerCase() === "svg"
-      ? new window.XMLSerializer().serializeToString(svgEl)
-      : "";
+    return new window.XMLSerializer().serializeToString(svgEl);
   } catch {
     return "";
   }

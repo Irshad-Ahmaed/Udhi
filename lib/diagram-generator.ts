@@ -50,6 +50,8 @@ function buildInitialPrompt(concept: Concept): string {
     "3. Include a descriptive <title> element AND at least 4 clear, readable <text> labels (including a visible diagram heading and labels for the key parts) with high contrast on a light (#ffffff or #f8fafc) background.",
     "4. Include at least one meaningful, smooth CSS (@keyframes inside <style>) or SMIL (<animate>, <animateTransform>, or <animateMotion> with dur) animation that visually demonstrates the concept.",
     "5. Use only self-contained SVG shapes and styles (no <script>, no event handlers, no <foreignObject>, no external URLs).",
+    "6. Do NOT write raw LaTeX ($...$ or \\text{...}) inside <text> elements—use plain Unicode characters (e.g. a² + b² = c², CO₂, H₂O, O₂, C₆H₁₂O₆, π, ×, →).",
+    "7. Never use HTML named entities like &pi;, &times;, &deg;, or &rarr; (SVG XML only allows &amp;, &lt;, &gt;, &quot;, &apos;), and never put unescaped '&' inside <style> or <text>. Keep all shapes below y = 85 so nothing overlaps the title/subtitle header.",
   ].join("\n");
 }
 

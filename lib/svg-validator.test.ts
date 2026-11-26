@@ -56,6 +56,23 @@ describe("validateSvg", () => {
     assert.equal(res.checks.find((c) => c.id === "valid_svg")?.passed, false);
   });
 
+  it("fails valid_svg on unescaped ampersand outside comments/CDATA", () => {
+    const bareAmp = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Bare Ampersand</title>
+  <style>/* Styles & Theme */</style>
+  <rect x="20" y="20" width="80" height="80" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="2s" />
+</svg>`;
+    const res = validateSvg(bareAmp);
+    assert.equal(res.checks.find((c) => c.id === "valid_svg")?.passed, false);
+  });
+
   it("fails within_viewbox when a circle or path extends outside viewBox", () => {
     const outOfBounds = `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
@@ -193,6 +210,26 @@ describe("validateSvg", () => {
   <text x="300" y="80" class="centered">States of Matter</text>
 </svg>`;
     const res = validateSvg(cssClassText);
+    assert.equal(res.passedAll, true, JSON.stringify(res.checks));
+  });
+
+  it("bounds <circle> with child <animateMotion><mpath> along the motion path", () => {
+    const motionSvg = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Series Circuit</title>
+  <path id="loop" d="M 100 100 L 500 100 L 500 300 L 100 300 Z" fill="none" stroke="#334155" />
+  <rect x="250" y="80" width="80" height="40" />
+  <rect x="250" y="280" width="80" height="40" />
+  <circle r="5" fill="#ef4444">
+    <animateMotion dur="3s" repeatCount="indefinite">
+      <mpath href="#loop" />
+    </animateMotion>
+  </circle>
+  <text x="300" y="50" text-anchor="middle">Circuit</text>
+  <text x="300" y="105" text-anchor="middle">Cell</text>
+  <text x="300" y="305" text-anchor="middle">Lamp</text>
+</svg>`;
+    const res = validateSvg(motionSvg);
     assert.equal(res.passedAll, true, JSON.stringify(res.checks));
   });
 });
