@@ -97,7 +97,7 @@ export function SvgPreview({ svg, maxHeight = 260 }: SvgPreviewProps) {
   return (
     <div
       ref={hostRef}
-      className="w-full overflow-hidden rounded-lg border border-slate-200 bg-white p-2 shadow-xs"
+      className="w-full overflow-hidden rounded-lg border border-zinc-200 bg-white p-2.5"
       aria-label="Animated SVG diagram preview"
     />
   );

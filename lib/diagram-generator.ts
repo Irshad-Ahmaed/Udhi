@@ -82,6 +82,8 @@ function buildRetryPrompt(
     "- Include a non-empty <title> element and at least 3 readable <text> labels.",
     "- Include a working SMIL animation (<animate>/<animateTransform>/<animateMotion> with dur) or CSS @keyframes animation referenced by an element.",
     "- Include at least 3 geometric shapes and no <script> or external URLs.",
+    "- Do NOT write raw LaTeX ($...$) or HTML entities (&pi;, &times;, &rarr;); use plain Unicode (π, ×, →, ², ₂) and '&amp;' for ampersands.",
+    "- Keep shapes below y = 85 so nothing overlaps the header.",
     "",
     "Previous SVG for reference:",
     truncatedPrev,
