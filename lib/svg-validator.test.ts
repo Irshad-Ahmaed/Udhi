@@ -338,4 +338,20 @@ describe("validateSvg", () => {
 </svg>`;
     assert.equal(validateSvg(nestedAndXlink).passedAll, true);
   });
+
+  it("fails within_viewbox when a large diagram shape overlaps header text", () => {
+    const headerOverlap = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Header overlap</title>
+  <rect width="600" height="400" fill="#f8fafc" />
+  <text x="40" y="45" font-size="20">Pythagoras Theorem</text>
+  <polygon points="150,150 280,240 370,110 240,20" fill="#fca5a5" stroke="#ef4444" />
+  <circle cx="150" cy="240" r="20" />
+  <text x="150" y="290">Side a</text>
+  <text x="250" y="290">Side b</text>
+  <animate attributeName="opacity" values="1;0.8;1" dur="2s" />
+</svg>`;
+    const res = validateSvg(headerOverlap);
+    assert.equal(res.checks.find((c) => c.id === "within_viewbox")?.passed, false);
+  });
 });

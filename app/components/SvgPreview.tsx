@@ -104,6 +104,7 @@ export function SvgPreview({ svg, maxHeight = 260 }: SvgPreviewProps) {
           max-width: 100%;
           height: auto;
           max-height: ${maxHeight}px;
+          overflow: hidden;
         }
         .fallback {
           padding: 1.5rem;
