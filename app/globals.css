@@ -5,14 +5,3 @@ body {
   color: #09090b;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
-
-select.no-native-arrow {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  background-image: none;
-}
-
-select.no-native-arrow::-ms-expand {
-  display: none;
-}

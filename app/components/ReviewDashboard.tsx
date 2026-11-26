@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SvgPreview } from "@/app/components/SvgPreview";
 import { CONCEPTS } from "@/data/concepts";
 import type { DiagramResult } from "@/lib/types";
@@ -36,6 +36,8 @@ export function ReviewDashboard({
   const [selectedConceptId, setSelectedConceptId] = useState<string>(
     CONCEPTS[0].id,
   );
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [expandedSvg, setExpandedSvg] = useState<DiagramResult | null>(null);
@@ -66,6 +68,27 @@ export function ReviewDashboard({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [expandedSvg]);
+
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(e.target as Node)
+      ) {
+        setDropdownOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDropdownOpen(false);
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [dropdownOpen]);
 
   const persistReviews = (updater: (prev: ReviewState) => ReviewState) => {
     setReviews((prev) => {
@@ -569,38 +592,90 @@ export function ReviewDashboard({
               </span>
             )}
 
-            <label htmlFor="concept-select" className="sr-only">
-              Concept to generate live
-            </label>
-            <div className="relative w-full sm:w-auto">
-              <select
+            <div ref={dropdownRef} className="relative w-full sm:w-64">
+              <button
                 id="concept-select"
-                value={selectedConceptId}
-                onChange={(e) => setSelectedConceptId(e.target.value)}
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={dropdownOpen}
+                aria-label="Select concept to generate live"
                 disabled={Boolean(generatingId)}
-                style={{ WebkitAppearance: "none", appearance: "none" }}
-                className="no-native-arrow h-9 w-full appearance-none rounded-lg border border-zinc-200 bg-white pr-9 pl-3 text-xs font-medium text-zinc-900 transition hover:border-zinc-300 focus:border-zinc-900 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-64"
+                onClick={() => setDropdownOpen((o) => !o)}
+                className="flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-left text-xs font-medium text-zinc-900 transition hover:border-zinc-300 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {CONCEPTS.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.number}. {c.name} ({c.subject})
-                  </option>
-                ))}
-              </select>
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 16 16"
-                fill="none"
-                className="pointer-events-none absolute top-1/2 right-2.5 h-4 w-4 -translate-y-1/2 text-zinc-500"
-              >
-                <path
-                  d="m4.5 6 3.5 3.5L11.5 6"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
+                <span className="truncate">
+                  {(() => {
+                    const current =
+                      CONCEPTS.find((c) => c.id === selectedConceptId) ??
+                      CONCEPTS[0];
+                    return `${current.number}. ${current.name} (${current.subject})`;
+                  })()}
+                </span>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${
+                    dropdownOpen ? "rotate-180" : ""
+                  }`}
+                >
+                  <path
+                    d="m4.5 6 3.5 3.5L11.5 6"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              {dropdownOpen && (
+                <ul
+                  role="listbox"
+                  aria-labelledby="concept-select"
+                  className="absolute right-0 left-0 z-30 mt-1.5 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg"
+                >
+                  {CONCEPTS.map((c) => {
+                    const selected = c.id === selectedConceptId;
+                    return (
+                      <li key={c.id} role="option" aria-selected={selected}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedConceptId(c.id);
+                            setDropdownOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition ${
+                            selected
+                              ? "bg-zinc-100 font-semibold text-zinc-950"
+                              : "font-medium text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950"
+                          }`}
+                        >
+                          <span className="truncate">
+                            {c.number}. {c.name} ({c.subject})
+                          </span>
+                          {selected && (
+                            <svg
+                              aria-hidden="true"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              className="h-3.5 w-3.5 shrink-0 text-zinc-900"
+                            >
+                              <path
+                                d="m3.5 8.5 3 3 6-6.5"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
