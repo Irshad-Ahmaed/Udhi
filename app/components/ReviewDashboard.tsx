@@ -11,12 +11,26 @@ type FilterTab = "all" | "approved" | "rejected" | "pending";
 interface ReviewEntry {
   decision: Decision;
   note: string;
+  svgHash: string;
   updatedAt?: string;
 }
 
 type ReviewState = Record<string, ReviewEntry>;
 
-const STORAGE_KEY = "udhi_diagram_reviews_v1";
+const STORAGE_KEY = "udhi_diagram_reviews_v2";
+
+function hashSvg(svg: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < svg.length; i++) {
+    hash ^= svg.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function getReviewKey(row: DiagramResult): string {
+  return `${row.conceptId}::${hashSvg(row.svg)}`;
+}
 
 interface ReviewDashboardProps {
   initialResults: DiagramResult[];
@@ -31,6 +45,7 @@ export function ReviewDashboard({
   const [liveIds, setLiveIds] = useState<Record<string, boolean>>({});
   const [reviews, setReviews] = useState<ReviewState>({});
   const [hydrated, setHydrated] = useState(false);
+  const [storageFailed, setStorageFailed] = useState(false);
 
   const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [selectedConceptId, setSelectedConceptId] = useState<string>(
@@ -39,10 +54,15 @@ export function ReviewDashboard({
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const generationEpochRef = useRef(0);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [expandedSvg, setExpandedSvg] = useState<DiagramResult | null>(null);
   const [modalTab, setModalTab] = useState<"preview" | "source">("preview");
   const [copiedSvg, setCopiedSvg] = useState(false);
+
+  const modalDialogRef = useRef<HTMLDivElement>(null);
+  const modalCloseBtnRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     try {
@@ -54,16 +74,45 @@ export function ReviewDashboard({
         }
       }
     } catch {
-      // Ignore malformed localStorage state
+      setStorageFailed(true);
     } finally {
       setHydrated(true);
     }
   }, []);
 
   useEffect(() => {
-    if (!expandedSvg) return;
+    if (!expandedSvg) {
+      if (previousFocusRef.current) {
+        previousFocusRef.current.focus();
+        previousFocusRef.current = null;
+      }
+      return;
+    }
+
+    modalCloseBtnRef.current?.focus();
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setExpandedSvg(null);
+      if (e.key === "Escape") {
+        setExpandedSvg(null);
+        return;
+      }
+      if (e.key === "Tab" && modalDialogRef.current) {
+        const focusables = Array.from(
+          modalDialogRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -95,21 +144,25 @@ export function ReviewDashboard({
       const next = updater(prev);
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        setStorageFailed(false);
       } catch {
-        // Ignore quota errors
+        setStorageFailed(true);
       }
       return next;
     });
   };
 
-  const setDecision = (conceptId: string, decision: Decision) => {
+  const setDecision = (row: DiagramResult, decision: Decision) => {
+    const key = getReviewKey(row);
+    const svgHash = hashSvg(row.svg);
     persistReviews((prev) => {
-      const existing = prev[conceptId] ?? { decision: null, note: "" };
+      const existing = prev[key] ?? { decision: null, note: "", svgHash };
       const nextDecision = existing.decision === decision ? null : decision;
       return {
         ...prev,
-        [conceptId]: {
+        [key]: {
           ...existing,
+          svgHash,
           decision: nextDecision,
           updatedAt: new Date().toISOString(),
         },
@@ -117,13 +170,16 @@ export function ReviewDashboard({
     });
   };
 
-  const setNote = (conceptId: string, note: string) => {
+  const setNote = (row: DiagramResult, note: string) => {
+    const key = getReviewKey(row);
+    const svgHash = hashSvg(row.svg);
     persistReviews((prev) => {
-      const existing = prev[conceptId] ?? { decision: null, note: "" };
+      const existing = prev[key] ?? { decision: null, note: "", svgHash };
       return {
         ...prev,
-        [conceptId]: {
+        [key]: {
           ...existing,
+          svgHash,
           note,
           updatedAt: new Date().toISOString(),
         },
@@ -133,6 +189,7 @@ export function ReviewDashboard({
 
   const handleGenerate = async (conceptId: string) => {
     if (generatingId) return;
+    const requestEpoch = generationEpochRef.current;
     setGeneratingId(conceptId);
     setErrorBanner(null);
 
@@ -148,6 +205,10 @@ export function ReviewDashboard({
         error?: string;
       } | null;
 
+      if (requestEpoch !== generationEpochRef.current) {
+        return;
+      }
+
       if (!response.ok || !payload?.result) {
         throw new Error(
           payload?.error || `Request failed with HTTP ${response.status}.`,
@@ -160,17 +221,23 @@ export function ReviewDashboard({
       );
       setLiveIds((prev) => ({ ...prev, [conceptId]: true }));
     } catch (err) {
-      setErrorBanner(
-        err instanceof Error
-          ? err.message
-          : "Unexpected error while generating diagram.",
-      );
+      if (requestEpoch === generationEpochRef.current) {
+        setErrorBanner(
+          err instanceof Error
+            ? err.message
+            : "Unexpected error while generating diagram.",
+        );
+      }
     } finally {
-      setGeneratingId(null);
+      if (requestEpoch === generationEpochRef.current) {
+        setGeneratingId(null);
+      }
     }
   };
 
   const resetToSaved = () => {
+    if (generatingId) return;
+    generationEpochRef.current += 1;
     setResults(initialResults);
     setLiveIds({});
     setErrorBanner(null);
@@ -180,6 +247,10 @@ export function ReviewDashboard({
     row: DiagramResult,
     tab: "preview" | "source" = "preview",
   ) => {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     setCopiedSvg(false);
     setModalTab(tab);
     setExpandedSvg(row);
@@ -195,16 +266,24 @@ export function ReviewDashboard({
     }
   };
 
+  const getRowReview = (row: DiagramResult): ReviewEntry => {
+    const entry = reviews[getReviewKey(row)];
+    if (!entry || entry.svgHash !== hashSvg(row.svg)) {
+      return { decision: null, note: "", svgHash: hashSvg(row.svg) };
+    }
+    return entry;
+  };
+
   const stats = useMemo(() => {
     const passedCount = results.filter((r) => r.passedAll).length;
     const totalCost = results.reduce((sum, r) => sum + r.estimatedCostUsd, 0);
     const totalValRetries = results.reduce((sum, r) => sum + r.retries, 0);
     const totalApiRetries = results.reduce((sum, r) => sum + r.apiRetries, 0);
     const approvedCount = results.filter(
-      (r) => reviews[r.conceptId]?.decision === "approved",
+      (r) => reviews[getReviewKey(r)]?.decision === "approved",
     ).length;
     const rejectedCount = results.filter(
-      (r) => reviews[r.conceptId]?.decision === "rejected",
+      (r) => reviews[getReviewKey(r)]?.decision === "rejected",
     ).length;
     const pendingCount = results.length - approvedCount - rejectedCount;
 
@@ -222,7 +301,7 @@ export function ReviewDashboard({
   const filteredResults = useMemo(() => {
     if (filterTab === "all") return results;
     return results.filter((r) => {
-      const dec = reviews[r.conceptId]?.decision ?? null;
+      const dec = reviews[getReviewKey(r)]?.decision ?? null;
       if (filterTab === "approved") return dec === "approved";
       if (filterTab === "rejected") return dec === "rejected";
       return dec === null;
@@ -399,13 +478,13 @@ export function ReviewDashboard({
   );
 
   const renderReviewCell = (row: DiagramResult) => {
-    const review = reviews[row.conceptId] ?? { decision: null, note: "" };
+    const review = getRowReview(row);
     return (
       <div>
         <div className="grid grid-cols-2 gap-1.5">
           <button
             type="button"
-            onClick={() => setDecision(row.conceptId, "approved")}
+            onClick={() => setDecision(row, "approved")}
             aria-pressed={review.decision === "approved"}
             className={`h-8 rounded-lg border px-3 text-xs font-medium transition focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:ring-offset-1 focus-visible:outline-none ${
               review.decision === "approved"
@@ -417,7 +496,7 @@ export function ReviewDashboard({
           </button>
           <button
             type="button"
-            onClick={() => setDecision(row.conceptId, "rejected")}
+            onClick={() => setDecision(row, "rejected")}
             aria-pressed={review.decision === "rejected"}
             className={`h-8 rounded-lg border px-3 text-xs font-medium transition focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:ring-offset-1 focus-visible:outline-none ${
               review.decision === "rejected"
@@ -431,7 +510,7 @@ export function ReviewDashboard({
 
         <textarea
           value={review.note}
-          onChange={(e) => setNote(row.conceptId, e.target.value)}
+          onChange={(e) => setNote(row, e.target.value)}
           placeholder="Add reviewer note..."
           aria-label={`Reviewer note for ${row.concept}`}
           rows={3}
@@ -453,9 +532,11 @@ export function ReviewDashboard({
               {review.decision ? review.decision.toUpperCase() : "PENDING"}
             </span>
           </span>
-          {hydrated && (review.decision || review.note) && (
+          {hydrated && storageFailed ? (
+            <span className="text-amber-700">Unsaved (storage blocked)</span>
+          ) : hydrated && (review.decision || review.note) ? (
             <span className="text-emerald-700">Saved locally</span>
-          )}
+          ) : null}
         </div>
       </div>
     );
@@ -463,365 +544,370 @@ export function ReviewDashboard({
 
   return (
     <div className="min-h-screen bg-[#fafafa] text-zinc-950">
-      {/* Top Vercel-style Header */}
-      <div className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
-          <div className="min-w-0 space-y-1">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-              <span className="font-medium text-zinc-900">Udhi Technologies</span>
-              <span>/</span>
-              <span>GCSE Visual QA</span>
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[11px] text-zinc-700">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                {primaryModel}
-              </span>
-            </div>
-            <h1 className="text-xl font-semibold tracking-tight text-zinc-950 sm:text-2xl">
-              Science Diagram Maker
-            </h1>
-            <p className="text-sm text-zinc-500">
-              5 animated GCSE diagrams validated in code with automated retry and
-              persistent reviewer sign-off.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:shrink-0">
-            <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
-              <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
-                Checks Passed
-              </div>
-              <div className="mt-0.5 flex items-center gap-1.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${
-                    stats.passedCount === results.length
-                      ? "bg-emerald-500"
-                      : "bg-amber-500"
-                  }`}
-                />
-                {stats.passedCount}/{results.length}
-              </div>
-            </div>
-
-            <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
-              <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
-                Approved
-              </div>
-              <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-emerald-700">
-                {hydrated ? stats.approvedCount : "—"}/{results.length}
-              </div>
-            </div>
-
-            <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
-              <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
-                Est. Cost
-              </div>
-              <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
-                ${stats.totalCost.toFixed(5)}
-              </div>
-            </div>
-
-            <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
-              <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
-                Retries
-              </div>
-              <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
-                {stats.totalValRetries}
-                {stats.totalApiRetries > 0 ? (
-                  <span className="ml-1 text-[11px] font-normal text-zinc-500">
-                    +{stats.totalApiRetries} API
-                  </span>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        {/* Toolbar: Filter Tabs + Custom-Styled Select & Generate Controls */}
-        <section
-          aria-label="Filter and live generation toolbar"
-          className="mb-5 flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-3.5 lg:flex-row lg:items-center lg:justify-between"
-        >
-          <div
-            role="tablist"
-            aria-label="Filter review rows"
-            className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-100 p-1 sm:inline-flex sm:w-auto"
-          >
-            {(
-              [
-                { id: "all", label: `All (${results.length})` },
-                {
-                  id: "approved",
-                  label: `Approved (${hydrated ? stats.approvedCount : "—"})`,
-                },
-                {
-                  id: "rejected",
-                  label: `Rejected (${hydrated ? stats.rejectedCount : "—"})`,
-                },
-                {
-                  id: "pending",
-                  label: `Pending (${hydrated ? stats.pendingCount : "—"})`,
-                },
-              ] as const
-            ).map((tab) => {
-              const active = filterTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  role="tab"
-                  aria-selected={active}
-                  type="button"
-                  onClick={() => setFilterTab(tab.id)}
-                  className={`rounded-md px-3 py-1.5 text-center text-xs font-medium whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none ${
-                    active
-                      ? "bg-white text-zinc-950 shadow-xs"
-                      : "text-zinc-600 hover:text-zinc-950"
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-            {!resultsLoadedFromFile && (
-              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
-                results.json not generated yet
-              </span>
-            )}
-
-            <div ref={dropdownRef} className="relative w-full sm:w-64">
-              <button
-                id="concept-select"
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={dropdownOpen}
-                aria-label="Select concept to generate live"
-                disabled={Boolean(generatingId)}
-                onClick={() => setDropdownOpen((o) => !o)}
-                className="flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-left text-xs font-medium text-zinc-900 transition hover:border-zinc-300 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <span className="truncate">
-                  {(() => {
-                    const current =
-                      CONCEPTS.find((c) => c.id === selectedConceptId) ??
-                      CONCEPTS[0];
-                    return `${current.number}. ${current.name} (${current.subject})`;
-                  })()}
+      <div inert={Boolean(expandedSvg)}>
+        {/* Top Vercel-style Header */}
+        <div className="border-b border-zinc-200 bg-white">
+          <div className="mx-auto flex max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                <span className="font-medium text-zinc-900">
+                  Udhi Technologies
                 </span>
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${
-                    dropdownOpen ? "rotate-180" : ""
-                  }`}
-                >
-                  <path
-                    d="m4.5 6 3.5 3.5L11.5 6"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                <span>/</span>
+                <span>GCSE Visual QA</span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[11px] text-zinc-700">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  {primaryModel}
+                </span>
+              </div>
+              <h1 className="text-xl font-semibold tracking-tight text-zinc-950 sm:text-2xl">
+                Science Diagram Maker
+              </h1>
+              <p className="text-sm text-zinc-500">
+                5 animated GCSE diagrams validated in code with automated retry
+                and persistent reviewer sign-off.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:shrink-0">
+              <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
+                <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
+                  Checks Passed
+                </div>
+                <div className="mt-0.5 flex items-center gap-1.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${
+                      stats.passedCount === results.length
+                        ? "bg-emerald-500"
+                        : "bg-amber-500"
+                    }`}
                   />
-                </svg>
-              </button>
+                  {stats.passedCount}/{results.length}
+                </div>
+              </div>
 
-              {dropdownOpen && (
-                <ul
-                  role="listbox"
-                  aria-labelledby="concept-select"
-                  className="absolute right-0 left-0 z-30 mt-1.5 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg"
-                >
-                  {CONCEPTS.map((c) => {
-                    const selected = c.id === selectedConceptId;
-                    return (
-                      <li key={c.id} role="option" aria-selected={selected}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedConceptId(c.id);
-                            setDropdownOpen(false);
-                          }}
-                          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition ${
-                            selected
-                              ? "bg-zinc-100 font-semibold text-zinc-950"
-                              : "font-medium text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950"
-                          }`}
-                        >
-                          <span className="truncate">
-                            {c.number}. {c.name} ({c.subject})
-                          </span>
-                          {selected && (
-                            <svg
-                              aria-hidden="true"
-                              viewBox="0 0 16 16"
-                              fill="none"
-                              className="h-3.5 w-3.5 shrink-0 text-zinc-900"
-                            >
-                              <path
-                                d="m3.5 8.5 3 3 6-6.5"
-                                stroke="currentColor"
-                                strokeWidth="1.6"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
+              <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
+                <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
+                  Approved
+                </div>
+                <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-emerald-700">
+                  {hydrated ? stats.approvedCount : "—"}/{results.length}
+                </div>
+              </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleGenerate(selectedConceptId)}
-                disabled={Boolean(generatingId)}
-                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-xs font-medium whitespace-nowrap text-white transition hover:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:ring-offset-1 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60 sm:flex-none"
-              >
-                {generatingId ? (
-                  <>
-                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-400 border-t-white" />
-                    Generating...
-                  </>
-                ) : (
-                  "Generate"
-                )}
-              </button>
+              <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
+                <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
+                  Est. Cost
+                </div>
+                <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
+                  ${stats.totalCost.toFixed(5)}
+                </div>
+              </div>
 
-              {hasLiveOverrides && (
-                <button
-                  type="button"
-                  onClick={resetToSaved}
-                  className="h-9 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium whitespace-nowrap text-zinc-700 transition hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none"
-                >
-                  Reset to saved
-                </button>
-              )}
+              <div className="min-w-[116px] rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5">
+                <div className="text-[11px] font-medium whitespace-nowrap text-zinc-500">
+                  Retries
+                </div>
+                <div className="mt-0.5 font-mono text-base font-semibold whitespace-nowrap tabular-nums text-zinc-950">
+                  {stats.totalValRetries}
+                  {stats.totalApiRetries > 0 ? (
+                    <span className="ml-1 text-[11px] font-normal text-zinc-500">
+                      +{stats.totalApiRetries} API
+                    </span>
+                  ) : null}
+                </div>
+              </div>
             </div>
           </div>
-        </section>
-
-        {errorBanner && (
-          <div
-            role="alert"
-            className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900"
-          >
-            <div className="leading-relaxed">
-              <span className="font-semibold">Live generation error: </span>
-              <span>{errorBanner}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setErrorBanner(null)}
-              className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-100 focus-visible:ring-2 focus-visible:ring-rose-600 focus-visible:outline-none"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        {/* Mobile / Tablet Stacked Cards (< lg) — zero horizontal scrolling */}
-        <div className="space-y-4 lg:hidden">
-          {filteredResults.length === 0 ? (
-            <div className="rounded-xl border border-zinc-200 bg-white px-4 py-12 text-center text-sm text-zinc-500">
-              No diagrams match the selected filter.{" "}
-              <button
-                type="button"
-                onClick={() => setFilterTab("all")}
-                className="font-medium text-zinc-900 underline underline-offset-2"
-              >
-                Show all 5
-              </button>
-            </div>
-          ) : (
-            filteredResults.map((row) => (
-              <article
-                key={row.conceptId}
-                className="space-y-4 rounded-xl border border-zinc-200 bg-white p-4"
-              >
-                {renderConceptCell(row)}
-                {renderDiagramCell(row)}
-                <div className="grid gap-4 border-t border-zinc-100 pt-4 sm:grid-cols-2">
-                  <div>
-                    <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
-                      Code Checks (5)
-                    </h3>
-                    {renderChecksCell(row)}
-                  </div>
-                  <div>
-                    <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
-                      Cost &amp; Retries
-                    </h3>
-                    {renderMetricsCell(row)}
-                  </div>
-                </div>
-                <div className="border-t border-zinc-100 pt-4">
-                  <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
-                    Review &amp; Notes
-                  </h3>
-                  {renderReviewCell(row)}
-                </div>
-              </article>
-            ))
-          )}
         </div>
 
-        {/* Desktop 5-Row Review Table (>= lg) */}
-        <div className="hidden overflow-hidden rounded-xl border border-zinc-200 bg-white lg:block">
-          <table className="w-full table-fixed border-collapse text-left text-sm">
-            <thead className="border-b border-zinc-200 bg-zinc-50">
-              <tr className="text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
-                <th className="w-[20%] px-4 py-3">Concept</th>
-                <th className="w-[27%] px-4 py-3">Diagram (Animated)</th>
-                <th className="w-[20%] px-4 py-3">Code Checks (5)</th>
-                <th className="w-[15%] px-4 py-3">Cost &amp; Retries</th>
-                <th className="w-[18%] px-4 py-3">Review &amp; Notes</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-200">
-              {filteredResults.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-12 text-center text-sm text-zinc-500"
+        <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+          {/* Toolbar: Filter Tabs + Custom Accessible Listbox & Generate Controls */}
+          <section
+            aria-label="Filter and live generation toolbar"
+            className="mb-5 flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-3.5 lg:flex-row lg:items-center lg:justify-between"
+          >
+            <div
+              role="tablist"
+              aria-label="Filter review rows"
+              className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-100 p-1 sm:inline-flex sm:w-auto"
+            >
+              {(
+                [
+                  { id: "all", label: `All (${results.length})` },
+                  {
+                    id: "approved",
+                    label: `Approved (${hydrated ? stats.approvedCount : "—"})`,
+                  },
+                  {
+                    id: "rejected",
+                    label: `Rejected (${hydrated ? stats.rejectedCount : "—"})`,
+                  },
+                  {
+                    id: "pending",
+                    label: `Pending (${hydrated ? stats.pendingCount : "—"})`,
+                  },
+                ] as const
+              ).map((tab) => {
+                const active = filterTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    role="tab"
+                    aria-selected={active}
+                    type="button"
+                    onClick={() => setFilterTab(tab.id)}
+                    className={`rounded-md px-3 py-1.5 text-center text-xs font-medium whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none ${
+                      active
+                        ? "bg-white text-zinc-950 shadow-xs"
+                        : "text-zinc-600 hover:text-zinc-950"
+                    }`}
                   >
-                    No diagrams match the selected filter.{" "}
-                    <button
-                      type="button"
-                      onClick={() => setFilterTab("all")}
-                      className="font-medium text-zinc-900 underline underline-offset-2"
-                    >
-                      Show all 5
-                    </button>
-                  </td>
-                </tr>
-              ) : (
-                filteredResults.map((row) => (
-                  <tr
-                    key={row.conceptId}
-                    className="align-top transition-colors hover:bg-zinc-50/60"
-                  >
-                    <td className="px-4 py-4">{renderConceptCell(row)}</td>
-                    <td className="px-4 py-4">{renderDiagramCell(row)}</td>
-                    <td className="px-4 py-4">{renderChecksCell(row)}</td>
-                    <td className="px-4 py-4">{renderMetricsCell(row)}</td>
-                    <td className="px-4 py-4">{renderReviewCell(row)}</td>
-                  </tr>
-                ))
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              {!resultsLoadedFromFile && (
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
+                  results.json not generated yet
+                </span>
               )}
-            </tbody>
-          </table>
+
+              <div ref={dropdownRef} className="relative w-full sm:w-64">
+                <button
+                  id="concept-select"
+                  type="button"
+                  aria-haspopup="listbox"
+                  aria-expanded={dropdownOpen}
+                  aria-label="Select concept to generate live"
+                  disabled={Boolean(generatingId)}
+                  onClick={() => setDropdownOpen((o) => !o)}
+                  className="flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-left text-xs font-medium text-zinc-900 transition hover:border-zinc-300 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span className="truncate">
+                    {(() => {
+                      const current =
+                        CONCEPTS.find((c) => c.id === selectedConceptId) ??
+                        CONCEPTS[0];
+                      return `${current.number}. ${current.name} (${current.subject})`;
+                    })()}
+                  </span>
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${
+                      dropdownOpen ? "rotate-180" : ""
+                    }`}
+                  >
+                    <path
+                      d="m4.5 6 3.5 3.5L11.5 6"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+
+                {dropdownOpen && (
+                  <ul
+                    role="listbox"
+                    aria-labelledby="concept-select"
+                    className="absolute right-0 left-0 z-30 mt-1.5 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg"
+                  >
+                    {CONCEPTS.map((c) => {
+                      const selected = c.id === selectedConceptId;
+                      return (
+                        <li key={c.id} role="option" aria-selected={selected}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedConceptId(c.id);
+                              setDropdownOpen(false);
+                            }}
+                            className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition ${
+                              selected
+                                ? "bg-zinc-100 font-semibold text-zinc-950"
+                                : "font-medium text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950"
+                            }`}
+                          >
+                            <span className="truncate">
+                              {c.number}. {c.name} ({c.subject})
+                            </span>
+                            {selected && (
+                              <svg
+                                aria-hidden="true"
+                                viewBox="0 0 16 16"
+                                fill="none"
+                                className="h-3.5 w-3.5 shrink-0 text-zinc-900"
+                              >
+                                <path
+                                  d="m3.5 8.5 3 3 6-6.5"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleGenerate(selectedConceptId)}
+                  disabled={Boolean(generatingId)}
+                  className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-zinc-950 px-4 text-xs font-medium whitespace-nowrap text-white transition hover:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:ring-offset-1 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60 sm:flex-none"
+                >
+                  {generatingId ? (
+                    <>
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-400 border-t-white" />
+                      Generating...
+                    </>
+                  ) : (
+                    "Generate"
+                  )}
+                </button>
+
+                {hasLiveOverrides && (
+                  <button
+                    type="button"
+                    onClick={resetToSaved}
+                    disabled={Boolean(generatingId)}
+                    className="h-9 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium whitespace-nowrap text-zinc-700 transition hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Reset to saved
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {errorBanner && (
+            <div
+              role="alert"
+              className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900"
+            >
+              <div className="leading-relaxed">
+                <span className="font-semibold">Live generation error: </span>
+                <span>{errorBanner}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setErrorBanner(null)}
+                className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-100 focus-visible:ring-2 focus-visible:ring-rose-600 focus-visible:outline-none"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Mobile / Tablet Stacked Cards (< lg) — zero horizontal scrolling */}
+          <div className="space-y-4 lg:hidden">
+            {filteredResults.length === 0 ? (
+              <div className="rounded-xl border border-zinc-200 bg-white px-4 py-12 text-center text-sm text-zinc-500">
+                No diagrams match the selected filter.{" "}
+                <button
+                  type="button"
+                  onClick={() => setFilterTab("all")}
+                  className="font-medium text-zinc-900 underline underline-offset-2"
+                >
+                  Show all 5
+                </button>
+              </div>
+            ) : (
+              filteredResults.map((row) => (
+                <article
+                  key={row.conceptId}
+                  className="space-y-4 rounded-xl border border-zinc-200 bg-white p-4"
+                >
+                  {renderConceptCell(row)}
+                  {renderDiagramCell(row)}
+                  <div className="grid gap-4 border-t border-zinc-100 pt-4 sm:grid-cols-2">
+                    <div>
+                      <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
+                        Code Checks (5)
+                      </h3>
+                      {renderChecksCell(row)}
+                    </div>
+                    <div>
+                      <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
+                        Cost &amp; Retries
+                      </h3>
+                      {renderMetricsCell(row)}
+                    </div>
+                  </div>
+                  <div className="border-t border-zinc-100 pt-4">
+                    <h3 className="mb-2 text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
+                      Review &amp; Notes
+                    </h3>
+                    {renderReviewCell(row)}
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+
+          {/* Desktop 5-Row Review Table (>= lg) */}
+          <div className="hidden overflow-hidden rounded-xl border border-zinc-200 bg-white lg:block">
+            <table className="w-full table-fixed border-collapse text-left text-sm">
+              <thead className="border-b border-zinc-200 bg-zinc-50">
+                <tr className="text-[11px] font-medium tracking-wider text-zinc-500 uppercase">
+                  <th className="w-[20%] px-4 py-3">Concept</th>
+                  <th className="w-[27%] px-4 py-3">Diagram (Animated)</th>
+                  <th className="w-[20%] px-4 py-3">Code Checks (5)</th>
+                  <th className="w-[15%] px-4 py-3">Cost &amp; Retries</th>
+                  <th className="w-[18%] px-4 py-3">Review &amp; Notes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-200">
+                {filteredResults.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={5}
+                      className="px-4 py-12 text-center text-sm text-zinc-500"
+                    >
+                      No diagrams match the selected filter.{" "}
+                      <button
+                        type="button"
+                        onClick={() => setFilterTab("all")}
+                        className="font-medium text-zinc-900 underline underline-offset-2"
+                      >
+                        Show all 5
+                      </button>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredResults.map((row) => (
+                    <tr
+                      key={row.conceptId}
+                      className="align-top transition-colors hover:bg-zinc-50/60"
+                    >
+                      <td className="px-4 py-4">{renderConceptCell(row)}</td>
+                      <td className="px-4 py-4">{renderDiagramCell(row)}</td>
+                      <td className="px-4 py-4">{renderChecksCell(row)}</td>
+                      <td className="px-4 py-4">{renderMetricsCell(row)}</td>
+                      <td className="px-4 py-4">{renderReviewCell(row)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
-      {/* Inspect / Zoom Modal with Preview + SVG Source tabs */}
+      {/* Inspect / Zoom Modal with Preview + SVG Source tabs & focus containment */}
       {expandedSvg && (
         <div
           role="dialog"
@@ -831,6 +917,7 @@ export function ReviewDashboard({
           onClick={() => setExpandedSvg(null)}
         >
           <div
+            ref={modalDialogRef}
             className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
@@ -849,6 +936,7 @@ export function ReviewDashboard({
                 </p>
               </div>
               <button
+                ref={modalCloseBtnRef}
                 type="button"
                 aria-label="Close modal"
                 onClick={() => setExpandedSvg(null)}

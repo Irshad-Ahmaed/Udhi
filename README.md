@@ -31,7 +31,7 @@ npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000). The 5 pre-generated diagrams from `results.json` load immediately without making any Gemini API calls.
 
-> **Windows Note:** If you are behind a local/corporate root CA on Windows and Node reports `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, prefix commands with `NODE_OPTIONS="--use-system-ca"` (PowerShell: `$env:NODE_OPTIONS="--use-system-ca"`).
+> **Windows Note:** On Node **22.15.0+** (including Node 24), if you are behind a local/corporate root CA on Windows and Node reports `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, prefix commands with `NODE_OPTIONS="--use-system-ca"` (PowerShell: `$env:NODE_OPTIONS="--use-system-ca"`). On **Node 20**, export your corporate root CA as a `.pem` file and set `NODE_EXTRA_CA_CERTS=<path-to-ca.pem>` instead (preserving full TLS verification).
 
 ---
 

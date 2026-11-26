@@ -3,8 +3,9 @@ import { estimateCostUsd } from "@/lib/pricing";
 import { validateSvg } from "@/lib/svg-validator";
 import type { CheckResult, Concept, DiagramResult } from "@/lib/types";
 
-export const DEFAULT_MODEL =
-  process.env.GEMINI_MODEL?.trim() || "gemini-3.5-flash-lite";
+export function getDefaultModel(): string {
+  return process.env.GEMINI_MODEL?.trim() || "gemini-3.5-flash-lite";
+}
 
 const MAX_API_RETRIES = 3;
 const MAX_VALIDATION_RETRIES = 1;
@@ -172,7 +173,7 @@ export async function generateAndValidateDiagram(
     );
   }
 
-  const model = options.model ?? DEFAULT_MODEL;
+  const model = options.model ?? getDefaultModel();
   const backoffMode = options.backoffMode ?? "serverless";
   const ai = new GoogleGenAI({ apiKey });
 

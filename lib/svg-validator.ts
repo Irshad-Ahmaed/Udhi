@@ -11,6 +11,14 @@ interface BBox {
   maxY: number;
 }
 
+interface CssStyleRule {
+  selector: string;
+  specificity: number;
+  order: number;
+  declarations: Record<string, string>;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 const IDENTITY_MATRIX: Matrix2D = [1, 0, 0, 1, 0, 0];
 const SKIPPED_CONTAINERS = new Set([
   "defs",
@@ -29,10 +37,28 @@ const GEOMETRY_TAGS = new Set([
   "polyline",
   "line",
 ]);
+const GEOMETRIC_ANIMATE_ATTRS = new Set([
+  "x",
+  "y",
+  "cx",
+  "cy",
+  "r",
+  "rx",
+  "ry",
+  "width",
+  "height",
+  "x1",
+  "y1",
+  "x2",
+  "y2",
+  "d",
+  "points",
+]);
 const VIEWBOX_TOLERANCE = 2;
 
 /**
- * Extracts raw <svg>...</svg> markup from model output, stripping markdown code fences if present.
+ * Extracts the complete outer <svg>...</svg> markup using tag-depth scanning
+ * so nested <svg> elements do not truncate the outer root element.
  */
 export function extractSvg(rawOutput: string): string | null {
   if (!rawOutput || typeof rawOutput !== "string") return null;
@@ -41,8 +67,39 @@ export function extractSvg(rawOutput: string): string | null {
     .replace(/```/g, "")
     .trim();
 
-  const match = cleaned.match(/<svg\b[\s\S]*?<\/svg>/i);
-  return match ? match[0].trim() : null;
+  const openMatch = cleaned.match(/<svg\b/i);
+  if (!openMatch || openMatch.index === undefined) return null;
+
+  const startIdx = openMatch.index;
+  const tagRegex = /<\/?svg\b[^>]*>/gi;
+  tagRegex.lastIndex = startIdx;
+
+  let depth = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(cleaned)) !== null) {
+    const token = match[0];
+    if (/^<\/svg\b/i.test(token)) {
+      depth--;
+      if (depth === 0) {
+        return cleaned.slice(startIdx, match.index + token.length).trim();
+      }
+    } else if (!token.endsWith("/>")) {
+      depth++;
+    } else if (depth === 0) {
+      return cleaned.slice(startIdx, match.index + token.length).trim();
+    }
+  }
+  return null;
+}
+
+function getHrefAttr(el: Element): string {
+  if (el.hasAttribute("href")) {
+    return (el.getAttribute("href") ?? "").trim();
+  }
+  if (el.hasAttribute("xlink:href")) {
+    return (el.getAttribute("xlink:href") ?? "").trim();
+  }
+  return "";
 }
 
 function multiplyMatrices(m1: Matrix2D, m2: Matrix2D): Matrix2D {
@@ -129,20 +186,111 @@ function parseNumber(val: string | null, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function getStrokePadding(el: Element): number {
-  const stroke = el.getAttribute("stroke");
-  if (stroke === "none") return 0;
-  const sw = el.getAttribute("stroke-width");
-  if (!sw) return 0;
-  return Math.max(0, parseNumber(sw, 0) / 2);
-}
-
 function getInlineStyleValue(el: Element, prop: string): string | null {
   const style = el.getAttribute("style");
   if (!style) return null;
   const regex = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`, "i");
   const match = style.match(regex);
   return match ? match[1].trim() : null;
+}
+
+function computeSelectorSpecificity(selector: string): number | null {
+  const s = selector.trim();
+  if (!s || /[\s>+~]/.test(s)) return null;
+  if (/^#[a-zA-Z0-9_-]+$/.test(s)) return 100;
+  if (/^\.[a-zA-Z0-9_-]+$/.test(s)) return 10;
+  if (/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(s)) return 1;
+  return null;
+}
+
+function parseStyleRules(svgEl: Element): CssStyleRule[] {
+  const rules: CssStyleRule[] = [];
+  const styleText = collectElements(svgEl)
+    .filter((el) => el.tagName.toLowerCase() === "style")
+    .map((el) => (el.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, ""))
+    .join("\n");
+
+  const cleaned = styleText
+    .replace(/@[^{;]+;/g, "")
+    .replace(/@(?:-webkit-)?keyframes\s+[^{]+\{(?:[^{}]*\{[^}]*\})*[^}]*\}/gi, "");
+
+  const ruleRegex = /([^{}]+)\{([^{}]+)\}/g;
+  let match: RegExpExecArray | null;
+  let order = 0;
+
+  while ((match = ruleRegex.exec(cleaned)) !== null) {
+    const selectors = match[1]
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const decls: Record<string, string> = {};
+    for (const part of match[2].split(";")) {
+      const idx = part.indexOf(":");
+      if (idx === -1) continue;
+      const prop = part.slice(0, idx).trim().toLowerCase();
+      const val = part.slice(idx + 1).trim();
+      if (prop && val) decls[prop] = val;
+    }
+    for (const selector of selectors) {
+      const specificity = computeSelectorSpecificity(selector);
+      if (specificity !== null) {
+        rules.push({ selector, specificity, order: order++, declarations: decls });
+      }
+    }
+  }
+  return rules;
+}
+
+function resolveCssProp(
+  el: Element,
+  prop: string,
+  cssRules: CssStyleRule[],
+): string | null {
+  const inlineVal = getInlineStyleValue(el, prop);
+  if (inlineVal !== null) return inlineVal;
+
+  const tag = el.tagName.toLowerCase();
+  const id = el.getAttribute("id")?.trim();
+  const classes = (el.getAttribute("class") ?? "")
+    .split(/\s+/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  let bestRule: CssStyleRule | null = null;
+  for (const rule of cssRules) {
+    const val = rule.declarations[prop];
+    if (!val) continue;
+    const sel = rule.selector;
+    const matches =
+      sel === tag ||
+      (sel.startsWith(".") && classes.includes(sel.slice(1))) ||
+      (Boolean(id) && sel === `#${id}`);
+
+    if (matches) {
+      if (
+        !bestRule ||
+        rule.specificity > bestRule.specificity ||
+        (rule.specificity === bestRule.specificity && rule.order > bestRule.order)
+      ) {
+        bestRule = rule;
+      }
+    }
+  }
+
+  if (bestRule) return bestRule.declarations[prop];
+
+  const attrVal = el.getAttribute(prop);
+  if (attrVal && attrVal.trim() !== "") return attrVal;
+
+  return null;
+}
+
+function getStrokePadding(el: Element, cssRules: CssStyleRule[]): number {
+  const stroke = resolveCssProp(el, "stroke", cssRules);
+  if (stroke && stroke.trim().toLowerCase() === "none") return 0;
+  const sw = resolveCssProp(el, "stroke-width", cssRules);
+  if (!sw) return 0;
+  return Math.max(0, parseNumber(sw, 0) / 2);
 }
 
 function sampleSvgArcPoints(
@@ -223,6 +371,54 @@ function sampleSvgArcPoints(
   return points;
 }
 
+function sampleCubicBezier(
+  p0x: number,
+  p0y: number,
+  p1x: number,
+  p1y: number,
+  p2x: number,
+  p2y: number,
+  p3x: number,
+  p3y: number,
+): [number, number][] {
+  const pts: [number, number][] = [];
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12;
+    const mt = 1 - t;
+    const x =
+      mt * mt * mt * p0x +
+      3 * mt * mt * t * p1x +
+      3 * mt * t * t * p2x +
+      t * t * t * p3x;
+    const y =
+      mt * mt * mt * p0y +
+      3 * mt * mt * t * p1y +
+      3 * mt * t * t * p2y +
+      t * t * t * p3y;
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
+function sampleQuadBezier(
+  p0x: number,
+  p0y: number,
+  p1x: number,
+  p1y: number,
+  p2x: number,
+  p2y: number,
+): [number, number][] {
+  const pts: [number, number][] = [];
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12;
+    const mt = 1 - t;
+    const x = mt * mt * p0x + 2 * mt * t * p1x + t * t * p2x;
+    const y = mt * mt * p0y + 2 * mt * t * p1y + t * t * p2y;
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
 function computePathBBox(d: string): BBox | null {
   const commands = makeAbsolute(parseSVG(d));
   if (commands.length === 0) return null;
@@ -233,6 +429,8 @@ function computePathBBox(d: string): BBox | null {
   let maxY = -Infinity;
   let curX = 0;
   let curY = 0;
+  let lastCubicCtrl: [number, number] | null = null;
+  let lastQuadCtrl: [number, number] | null = null;
 
   const include = (x: number, y: number) => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -252,32 +450,82 @@ function computePathBBox(d: string): BBox | null {
         include(cmd.x, cmd.y);
         curX = cmd.x;
         curY = cmd.y;
+        lastCubicCtrl = null;
+        lastQuadCtrl = null;
         break;
       }
       case "C": {
-        include(cmd.x1, cmd.y1);
-        include(cmd.x2, cmd.y2);
-        include(cmd.x, cmd.y);
+        for (const [px, py] of sampleCubicBezier(
+          curX,
+          curY,
+          cmd.x1,
+          cmd.y1,
+          cmd.x2,
+          cmd.y2,
+          cmd.x,
+          cmd.y,
+        )) {
+          include(px, py);
+        }
+        lastCubicCtrl = [cmd.x2, cmd.y2];
+        lastQuadCtrl = null;
         curX = cmd.x;
         curY = cmd.y;
         break;
       }
       case "S": {
-        include(cmd.x2, cmd.y2);
-        include(cmd.x, cmd.y);
+        const c1x: number = lastCubicCtrl ? 2 * curX - lastCubicCtrl[0] : curX;
+        const c1y: number = lastCubicCtrl ? 2 * curY - lastCubicCtrl[1] : curY;
+        for (const [px, py] of sampleCubicBezier(
+          curX,
+          curY,
+          c1x,
+          c1y,
+          cmd.x2,
+          cmd.y2,
+          cmd.x,
+          cmd.y,
+        )) {
+          include(px, py);
+        }
+        lastCubicCtrl = [cmd.x2, cmd.y2];
+        lastQuadCtrl = null;
         curX = cmd.x;
         curY = cmd.y;
         break;
       }
       case "Q": {
-        include(cmd.x1, cmd.y1);
-        include(cmd.x, cmd.y);
+        for (const [px, py] of sampleQuadBezier(
+          curX,
+          curY,
+          cmd.x1,
+          cmd.y1,
+          cmd.x,
+          cmd.y,
+        )) {
+          include(px, py);
+        }
+        lastQuadCtrl = [cmd.x1, cmd.y1];
+        lastCubicCtrl = null;
         curX = cmd.x;
         curY = cmd.y;
         break;
       }
       case "T": {
-        include(cmd.x, cmd.y);
+        const cx: number = lastQuadCtrl ? 2 * curX - lastQuadCtrl[0] : curX;
+        const cy: number = lastQuadCtrl ? 2 * curY - lastQuadCtrl[1] : curY;
+        for (const [px, py] of sampleQuadBezier(
+          curX,
+          curY,
+          cx,
+          cy,
+          cmd.x,
+          cmd.y,
+        )) {
+          include(px, py);
+        }
+        lastQuadCtrl = [cx, cy];
+        lastCubicCtrl = null;
         curX = cmd.x;
         curY = cmd.y;
         break;
@@ -295,6 +543,8 @@ function computePathBBox(d: string): BBox | null {
           cmd.y,
         );
         for (const [px, py] of pts) include(px, py);
+        lastCubicCtrl = null;
+        lastQuadCtrl = null;
         curX = cmd.x;
         curY = cmd.y;
         break;
@@ -353,111 +603,43 @@ function estimateTextSpanBBox(
   };
 }
 
-interface CssStyleRule {
-  selector: string;
-  declarations: Record<string, string>;
-}
-
-function parseStyleRules(svgEl: Element): CssStyleRule[] {
-  const rules: CssStyleRule[] = [];
-  const styleText = collectElements(svgEl)
-    .filter((el) => el.tagName.toLowerCase() === "style")
-    .map((el) => (el.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, ""))
-    .join("\n");
-
-  // Strip @keyframes / @import / @media blocks before matching simple selector rules
-  const cleaned = styleText
-    .replace(/@[^{;]+;/g, "")
-    .replace(/@(?:-webkit-)?keyframes\s+[^{]+\{(?:[^{}]*\{[^}]*\})*[^}]*\}/gi, "");
-
-  const ruleRegex = /([^{}]+)\{([^{}]+)\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = ruleRegex.exec(cleaned)) !== null) {
-    const selectors = match[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const decls: Record<string, string> = {};
-    for (const part of match[2].split(";")) {
-      const idx = part.indexOf(":");
-      if (idx === -1) continue;
-      const prop = part.slice(0, idx).trim().toLowerCase();
-      const val = part.slice(idx + 1).trim();
-      if (prop && val) decls[prop] = val;
-    }
-    for (const selector of selectors) {
-      rules.push({ selector, declarations: decls });
-    }
-  }
-  return rules;
-}
-
-function resolveCssProp(
-  el: Element,
-  prop: string,
-  cssRules: CssStyleRule[],
-): string | null {
-  const inlineVal = getInlineStyleValue(el, prop);
-  if (inlineVal !== null) return inlineVal;
-
-  const attrVal = el.getAttribute(prop);
-  if (attrVal && attrVal.trim() !== "") return attrVal;
-
-  const tag = el.tagName.toLowerCase();
-  const id = el.getAttribute("id")?.trim();
-  const classes = (el.getAttribute("class") ?? "")
-    .split(/\s+/)
-    .map((c) => c.trim())
-    .filter(Boolean);
-
-  let matched: string | null = null;
-  for (const rule of cssRules) {
-    const val = rule.declarations[prop];
-    if (!val) continue;
-    const sel = rule.selector;
-    if (sel === tag) {
-      matched = val;
-    } else if (sel.startsWith(".") && classes.includes(sel.slice(1))) {
-      matched = val;
-    } else if (id && sel === `#${id}`) {
-      matched = val;
-    }
-  }
-  return matched;
-}
-
 function getElementLocalBBox(
   el: Element,
   idMap: Map<string, Element>,
   cssRules: CssStyleRule[],
+  attrOverrides?: Record<string, string>,
   visitedIds = new Set<string>(),
 ): BBox | null {
   const tag = el.tagName.toLowerCase();
-  const pad = getStrokePadding(el);
+  const pad = getStrokePadding(el, cssRules);
+  const attr = (name: string) =>
+    attrOverrides && name in attrOverrides
+      ? attrOverrides[name]
+      : el.getAttribute(name);
   let box: BBox | null = null;
 
   if (tag === "rect") {
-    const x = parseNumber(el.getAttribute("x"), 0);
-    const y = parseNumber(el.getAttribute("y"), 0);
-    const w = parseNumber(el.getAttribute("width"), 0);
-    const h = parseNumber(el.getAttribute("height"), 0);
+    const x = parseNumber(attr("x"), 0);
+    const y = parseNumber(attr("y"), 0);
+    const w = parseNumber(attr("width"), 0);
+    const h = parseNumber(attr("height"), 0);
     box = { minX: x, minY: y, maxX: x + w, maxY: y + h };
   } else if (tag === "circle") {
-    const cx = parseNumber(el.getAttribute("cx"), 0);
-    const cy = parseNumber(el.getAttribute("cy"), 0);
-    const r = Math.abs(parseNumber(el.getAttribute("r"), 0));
+    const cx = parseNumber(attr("cx"), 0);
+    const cy = parseNumber(attr("cy"), 0);
+    const r = Math.abs(parseNumber(attr("r"), 0));
     box = { minX: cx - r, minY: cy - r, maxX: cx + r, maxY: cy + r };
   } else if (tag === "ellipse") {
-    const cx = parseNumber(el.getAttribute("cx"), 0);
-    const cy = parseNumber(el.getAttribute("cy"), 0);
-    const rx = Math.abs(parseNumber(el.getAttribute("rx"), 0));
-    const ry = Math.abs(parseNumber(el.getAttribute("ry"), 0));
+    const cx = parseNumber(attr("cx"), 0);
+    const cy = parseNumber(attr("cy"), 0);
+    const rx = Math.abs(parseNumber(attr("rx"), 0));
+    const ry = Math.abs(parseNumber(attr("ry"), 0));
     box = { minX: cx - rx, minY: cy - ry, maxX: cx + rx, maxY: cy + ry };
   } else if (tag === "line") {
-    const x1 = parseNumber(el.getAttribute("x1"), 0);
-    const y1 = parseNumber(el.getAttribute("y1"), 0);
-    const x2 = parseNumber(el.getAttribute("x2"), 0);
-    const y2 = parseNumber(el.getAttribute("y2"), 0);
+    const x1 = parseNumber(attr("x1"), 0);
+    const y1 = parseNumber(attr("y1"), 0);
+    const x2 = parseNumber(attr("x2"), 0);
+    const y2 = parseNumber(attr("y2"), 0);
     box = {
       minX: Math.min(x1, x2),
       minY: Math.min(y1, y2),
@@ -465,7 +647,7 @@ function getElementLocalBBox(
       maxY: Math.max(y1, y2),
     };
   } else if (tag === "polyline" || tag === "polygon") {
-    const raw = el.getAttribute("points") ?? "";
+    const raw = attr("points") ?? "";
     const nums = raw
       .trim()
       .split(/[\s,]+/)
@@ -486,16 +668,12 @@ function getElementLocalBBox(
       box = { minX, minY, maxX, maxY };
     }
   } else if (tag === "path") {
-    const d = el.getAttribute("d");
+    const d = attr("d");
     if (d) box = computePathBBox(d);
   } else if (tag === "use") {
-    const href = (
-      el.getAttribute("href") ??
-      el.getAttribute("xlink:href") ??
-      ""
-    ).trim();
-    const ux = parseNumber(el.getAttribute("x"), 0);
-    const uy = parseNumber(el.getAttribute("y"), 0);
+    const href = getHrefAttr(el);
+    const ux = parseNumber(attr("x"), 0);
+    const uy = parseNumber(attr("y"), 0);
     if (href.startsWith("#")) {
       const targetId = href.slice(1);
       const target = idMap.get(targetId);
@@ -517,8 +695,8 @@ function getElementLocalBBox(
       box = { minX: ux, minY: uy, maxX: ux, maxY: uy };
     }
   } else if (tag === "text") {
-    const parentX = parseNumber(el.getAttribute("x"), 0);
-    const parentY = parseNumber(el.getAttribute("y"), 0);
+    const parentX = parseNumber(attr("x"), 0);
+    const parentY = parseNumber(attr("y"), 0);
     const fontSizeRaw = resolveCssProp(el, "font-size", cssRules);
     const parentFontSize = Math.max(6, parseNumber(fontSizeRaw, 14));
     const parentAnchor = (
@@ -528,7 +706,10 @@ function getElementLocalBBox(
     const tspans: Element[] = [];
     for (let i = 0; i < el.childNodes.length; i++) {
       const child = el.childNodes[i];
-      if (child.nodeType === 1 && (child as Element).tagName.toLowerCase() === "tspan") {
+      if (
+        child.nodeType === 1 &&
+        (child as Element).tagName.toLowerCase() === "tspan"
+      ) {
         tspans.push(child as Element);
       }
     }
@@ -550,7 +731,9 @@ function getElementLocalBBox(
           ? parseNumber(ts.getAttribute("y"), curY)
           : curY;
         const tsFontRaw = resolveCssProp(ts, "font-size", cssRules);
-        const fs = tsFontRaw ? Math.max(6, parseNumber(tsFontRaw, parentFontSize)) : parentFontSize;
+        const fs = tsFontRaw
+          ? Math.max(6, parseNumber(tsFontRaw, parentFontSize))
+          : parentFontSize;
         const anchor = (
           resolveCssProp(ts, "text-anchor", cssRules) ?? parentAnchor
         ).toLowerCase();
@@ -565,7 +748,13 @@ function getElementLocalBBox(
 
     const content = getVisibleTextContent(el).replace(/\s+/g, " ").trim();
     if (!content) return null;
-    return estimateTextSpanBBox(content, parentX, parentY, parentFontSize, parentAnchor);
+    return estimateTextSpanBBox(
+      content,
+      parentX,
+      parentY,
+      parentFontSize,
+      parentAnchor,
+    );
   }
 
   if (!box) return null;
@@ -587,7 +776,7 @@ function getSubtreeBBox(
   const matrix = parseTransform(el.getAttribute("transform"));
 
   if (tag !== "g" && tag !== "svg") {
-    const local = getElementLocalBBox(el, idMap, cssRules, visitedIds);
+    const local = getElementLocalBBox(el, idMap, cssRules, undefined, visitedIds);
     return local ? transformBBox(local, matrix) : null;
   }
 
@@ -601,6 +790,126 @@ function getSubtreeBBox(
   }
   const union = unionBBoxes(childBoxes);
   return union ? transformBBox(union, matrix) : null;
+}
+
+function getAnimatedElementBBox(
+  el: Element,
+  idMap: Map<string, Element>,
+  cssRules: CssStyleRule[],
+): BBox | null {
+  const childElements: Element[] = [];
+  for (let i = 0; i < el.childNodes.length; i++) {
+    if (el.childNodes[i].nodeType === 1) {
+      childElements.push(el.childNodes[i] as Element);
+    }
+  }
+
+  const motionChild = childElements.find(
+    (c) => c.tagName.toLowerCase() === "animatemotion",
+  );
+  if (motionChild) {
+    let motionPathD = motionChild.getAttribute("path");
+    if (!motionPathD) {
+      const mpath = collectElements(motionChild).find(
+        (c) => c.tagName.toLowerCase() === "mpath",
+      );
+      const href = mpath ? getHrefAttr(mpath) : "";
+      if (href.startsWith("#")) {
+        const target = idMap.get(href.slice(1));
+        if (target) {
+          motionPathD =
+            (target.hasAttribute("d") ? target.getAttribute("d") : null) ??
+            resolveCssProp(target, "d", cssRules)?.replace(
+              /^path\(["']?|["']?\)$/g,
+              "",
+            ) ??
+            null;
+        }
+      }
+    }
+    const pathBox = motionPathD ? computePathBBox(motionPathD) : null;
+    if (!pathBox) {
+      throw new Error("Unable to bound <animateMotion> trajectory");
+    }
+    const baseBox = getElementLocalBBox(el, idMap, cssRules);
+    if (!baseBox) return pathBox;
+    return {
+      minX: pathBox.minX + baseBox.minX,
+      minY: pathBox.minY + baseBox.minY,
+      maxX: pathBox.maxX + baseBox.maxX,
+      maxY: pathBox.maxY + baseBox.maxY,
+    };
+  }
+
+  const baseBox = getElementLocalBBox(el, idMap, cssRules);
+  const animateChildren = childElements.filter((c) => {
+    const t = c.tagName.toLowerCase();
+    return t === "animate" || t === "set" || t === "animatetransform";
+  });
+
+  if (animateChildren.length === 0) return baseBox;
+
+  const boxes: BBox[] = baseBox ? [baseBox] : [];
+  for (const anim of animateChildren) {
+    const animTag = anim.tagName.toLowerCase();
+    if (animTag === "animatetransform") {
+      if (!baseBox) continue;
+      const type = (anim.getAttribute("type") ?? "translate").toLowerCase();
+      const rawVals = anim.hasAttribute("values")
+        ? (anim.getAttribute("values") ?? "").split(";").map((s) => s.trim())
+        : [anim.getAttribute("from"), anim.getAttribute("to")].filter(
+            (v): v is string => Boolean(v && v.trim()),
+          );
+
+      if (rawVals.length === 0) {
+        throw new Error(`Unable to bound <animateTransform type="${type}">`);
+      }
+      for (const val of rawVals) {
+        const m = parseTransform(`${type}(${val})`);
+        boxes.push(transformBBox(baseBox, m));
+      }
+      continue;
+    }
+
+    const attrName = (anim.getAttribute("attributeName") ?? "").trim();
+    if (!GEOMETRIC_ANIMATE_ATTRS.has(attrName.toLowerCase())) {
+      continue;
+    }
+
+    const rawVals = anim.hasAttribute("values")
+      ? (anim.getAttribute("values") ?? "")
+          .split(";")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [
+          anim.getAttribute("from"),
+          anim.getAttribute("to"),
+          anim.hasAttribute("by")
+            ? String(
+                parseNumber(el.getAttribute(attrName), 0) +
+                  parseNumber(anim.getAttribute("by"), 0),
+              )
+            : null,
+        ].filter((v): v is string => Boolean(v && v.trim()));
+
+    if (rawVals.length === 0) {
+      throw new Error(`Unable to bound geometry <animate attributeName="${attrName}">`);
+    }
+
+    for (const val of rawVals) {
+      const box = getElementLocalBBox(el, idMap, cssRules, {
+        [attrName]: val,
+      });
+      if (!box) {
+        throw new Error(
+          `Unable to evaluate geometry <animate attributeName="${attrName}" value="${val}">`,
+        );
+      }
+      boxes.push(box);
+    }
+  }
+
+  return unionBBoxes(boxes);
 }
 
 function collectElements(root: Element): Element[] {
@@ -670,49 +979,7 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
 
     if (tag !== "svg" && tag !== "g") {
       try {
-        // Elements driven by child <animateMotion> follow the motion path, not static (0,0)
-        const motionChild = Array.from(el.childNodes).find(
-          (c) => c.nodeType === 1 && (c as Element).tagName.toLowerCase() === "animatemotion",
-        ) as Element | undefined;
-
-        let local: BBox | null = null;
-        if (motionChild) {
-          let motionPathD = motionChild.getAttribute("path");
-          if (!motionPathD) {
-            const mpath = Array.from(motionChild.childNodes).find(
-              (c) => c.nodeType === 1 && (c as Element).tagName.toLowerCase() === "mpath",
-            ) as Element | undefined;
-            const href = (
-              mpath?.getAttribute("href") ??
-              mpath?.getAttribute("xlink:href") ??
-              ""
-            ).trim();
-            if (href.startsWith("#")) {
-              const target = idMap.get(href.slice(1));
-              motionPathD =
-                target?.getAttribute("d") ??
-                resolveCssProp(target as Element, "d", cssRules)?.replace(/^path\(["']?|["']?\)$/g, "") ??
-                null;
-            }
-          }
-          const pathBox = motionPathD ? computePathBBox(motionPathD) : null;
-          const baseBox = getElementLocalBBox(el, idMap, cssRules);
-          if (pathBox && baseBox) {
-            const halfW = (baseBox.maxX - baseBox.minX) / 2;
-            const halfH = (baseBox.maxY - baseBox.minY) / 2;
-            local = {
-              minX: pathBox.minX - halfW,
-              minY: pathBox.minY - halfH,
-              maxX: pathBox.maxX + halfW,
-              maxY: pathBox.maxY + halfH,
-            };
-          } else {
-            local = pathBox;
-          }
-        } else {
-          local = getElementLocalBBox(el, idMap, cssRules);
-        }
-
+        const local = getAnimatedElementBBox(el, idMap, cssRules);
         if (local) {
           const box = transformBBox(local, currentMatrix);
           if (
@@ -753,37 +1020,88 @@ function checkViewBox(svgEl: Element): { passed: boolean; message: string } {
   };
 }
 
-function checkTitleAndLabels(elements: Element[]): {
+function checkTitleAndLabels(svgEl: Element): {
   passed: boolean;
   message: string;
 } {
-  const titles = elements.filter(
-    (el) =>
-      el.tagName.toLowerCase() === "title" &&
-      (el.textContent ?? "").trim().length > 0,
-  );
-  const textLabels = elements.filter(
-    (el) =>
-      el.tagName.toLowerCase() === "text" &&
-      getVisibleTextContent(el).trim().length > 0,
-  );
+  const idMap = new Map<string, Element>();
+  for (const el of collectElements(svgEl)) {
+    const id = el.getAttribute("id");
+    if (id) idMap.set(id, el);
+  }
 
-  if (titles.length === 0) {
+  // Root-level or rendered <title> (excluding titles nested inside <defs>/<symbol>)
+  let hasRootTitle = false;
+  for (let i = 0; i < svgEl.childNodes.length; i++) {
+    const child = svgEl.childNodes[i];
+    if (
+      child.nodeType === 1 &&
+      (child as Element).tagName.toLowerCase() === "title" &&
+      (child.textContent ?? "").trim().length > 0
+    ) {
+      hasRootTitle = true;
+      break;
+    }
+  }
+
+  let renderedLabelCount = 0;
+  const countLabels = (node: Node, visitedIds = new Set<string>()) => {
+    if (node.nodeType !== 1) return;
+    const el = node as Element;
+    const tag = el.tagName.toLowerCase();
+    if (SKIPPED_CONTAINERS.has(tag)) return;
+
+    if (tag === "text") {
+      if (getVisibleTextContent(el).replace(/\s+/g, " ").trim().length > 0) {
+        renderedLabelCount++;
+      }
+      return;
+    }
+
+    if (tag === "use") {
+      const href = getHrefAttr(el);
+      if (href.startsWith("#")) {
+        const targetId = href.slice(1);
+        const target = idMap.get(targetId);
+        if (target && !visitedIds.has(targetId)) {
+          visitedIds.add(targetId);
+          for (let i = 0; i < target.childNodes.length; i++) {
+            countLabels(target.childNodes[i], visitedIds);
+          }
+          if (
+            target.tagName.toLowerCase() === "text" &&
+            getVisibleTextContent(target).replace(/\s+/g, " ").trim().length > 0
+          ) {
+            renderedLabelCount++;
+          }
+          visitedIds.delete(targetId);
+        }
+      }
+      return;
+    }
+
+    for (let i = 0; i < el.childNodes.length; i++) {
+      countLabels(el.childNodes[i], visitedIds);
+    }
+  };
+  countLabels(svgEl);
+
+  if (!hasRootTitle) {
     return {
       passed: false,
-      message: `Missing non-empty <title> element (found ${textLabels.length} text labels).`,
+      message: `Missing non-empty <title> element at <svg> root (found ${renderedLabelCount} rendered text labels).`,
     };
   }
-  if (textLabels.length < 3) {
+  if (renderedLabelCount < 3) {
     return {
       passed: false,
-      message: `Found <title>, but only ${textLabels.length} non-empty <text> label(s); at least 3 required.`,
+      message: `Found <title>, but only ${renderedLabelCount} rendered <text> label(s); at least 3 required.`,
     };
   }
 
   return {
     passed: true,
-    message: `Found <title> and ${textLabels.length} <text> labels.`,
+    message: `Found <title> and ${renderedLabelCount} rendered <text> labels.`,
   };
 }
 
@@ -793,6 +1111,21 @@ function hasPositiveDur(el: Element): boolean {
   if (dur === "indefinite") return true;
   const num = Number.parseFloat(dur);
   return Number.isFinite(num) && num > 0;
+}
+
+function cssBlockHasPositiveDuration(blockBody: string, animShorthandVal: string): boolean {
+  // Check animation-duration longhand in the same declaration block
+  const durProp = blockBody.match(/animation-duration\s*:\s*([^;]+)/i);
+  if (durProp) {
+    const d = Number.parseFloat(durProp[1].trim());
+    return Number.isFinite(d) && d > 0;
+  }
+
+  // Otherwise check first <time> token in animation shorthand (e.g. "fade 2s infinite" or "500ms fade")
+  const timeMatches = animShorthandVal.match(/(?:^|\s)([+-]?\d*\.?\d+)(ms|s)(?=\s|$|,)/gi);
+  if (!timeMatches || timeMatches.length === 0) return false;
+  const firstTime = Number.parseFloat(timeMatches[0].trim());
+  return Number.isFinite(firstTime) && firstTime > 0;
 }
 
 function checkAnimation(elements: Element[]): {
@@ -834,21 +1167,37 @@ function checkAnimation(elements: Element[]): {
   }
 
   if (keyframeNames.size > 0) {
-    const inlineStyles = elements
-      .map((el) => el.getAttribute("style") ?? "")
-      .join("\n");
-    const allCss = `${styleBlocks}\n${inlineStyles}`;
-    const animPropRegex = /animation(?:-name)?\s*:\s*([^;}{]+)/gi;
-    let animMatch: RegExpExecArray | null;
-    while ((animMatch = animPropRegex.exec(allCss)) !== null) {
-      const value = animMatch[1].trim();
-      if (value.toLowerCase() === "none") continue;
-      for (const name of keyframeNames) {
-        if (new RegExp(`\\b${name}\\b`).test(value)) {
-          return {
-            passed: true,
-            message: `Found CSS @keyframes animation ("${name}").`,
-          };
+    const strippedRules = styleBlocks.replace(
+      /@(?:-webkit-)?keyframes\s+[^{]+\{(?:[^{}]*\{[^}]*\})*[^}]*\}/gi,
+      "",
+    );
+    const declBlocks: string[] = [];
+    const ruleBodyRegex = /\{([^{}]+)\}/g;
+    let rbMatch: RegExpExecArray | null;
+    while ((rbMatch = ruleBodyRegex.exec(strippedRules)) !== null) {
+      declBlocks.push(rbMatch[1]);
+    }
+    for (const el of elements) {
+      const inline = el.getAttribute("style");
+      if (inline) declBlocks.push(inline);
+    }
+
+    for (const block of declBlocks) {
+      const animPropRegex = /animation(?:-name)?\s*:\s*([^;]+)/gi;
+      let animMatch: RegExpExecArray | null;
+      while ((animMatch = animPropRegex.exec(block)) !== null) {
+        const value = animMatch[1].trim();
+        if (value.toLowerCase() === "none") continue;
+        for (const name of keyframeNames) {
+          if (
+            new RegExp(`\\b${name}\\b`).test(value) &&
+            cssBlockHasPositiveDuration(block, value)
+          ) {
+            return {
+              passed: true,
+              message: `Found CSS @keyframes animation ("${name}").`,
+            };
+          }
         }
       }
     }
@@ -857,8 +1206,89 @@ function checkAnimation(elements: Element[]): {
   return {
     passed: false,
     message:
-      "No valid SMIL (<animate>/<animateTransform>/<animateMotion>) or referenced CSS @keyframes animation found.",
+      "No active SMIL (<animate>/<animateTransform>/<animateMotion> with dur > 0) or CSS @keyframes animation with positive duration found.",
   };
+}
+
+function isRenderableShape(
+  el: Element,
+  idMap: Map<string, Element>,
+  visitedIds = new Set<string>(),
+): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "rect") {
+    return (
+      parseNumber(el.getAttribute("width"), 0) > 0 &&
+      parseNumber(el.getAttribute("height"), 0) > 0
+    );
+  }
+  if (tag === "circle") {
+    return Math.abs(parseNumber(el.getAttribute("r"), 0)) > 0;
+  }
+  if (tag === "ellipse") {
+    return (
+      Math.abs(parseNumber(el.getAttribute("rx"), 0)) > 0 &&
+      Math.abs(parseNumber(el.getAttribute("ry"), 0)) > 0
+    );
+  }
+  if (tag === "line") {
+    const x1 = parseNumber(el.getAttribute("x1"), 0);
+    const y1 = parseNumber(el.getAttribute("y1"), 0);
+    const x2 = parseNumber(el.getAttribute("x2"), 0);
+    const y2 = parseNumber(el.getAttribute("y2"), 0);
+    return x1 !== x2 || y1 !== y2;
+  }
+  if (tag === "polygon" || tag === "polyline") {
+    const nums = (el.getAttribute("points") ?? "")
+      .trim()
+      .split(/[\s,]+/)
+      .filter(Boolean)
+      .map(Number)
+      .filter(Number.isFinite);
+    return nums.length >= 4;
+  }
+  if (tag === "path") {
+    const d = (el.getAttribute("d") ?? "").trim();
+    return d.length > 0 && computePathBBox(d) !== null;
+  }
+  if (tag === "use") {
+    const href = getHrefAttr(el);
+    if (!href.startsWith("#")) return false;
+    const targetId = href.slice(1);
+    const target = idMap.get(targetId);
+    if (!target || visitedIds.has(targetId)) return false;
+    visitedIds.add(targetId);
+    const tTag = target.tagName.toLowerCase();
+    let ok = false;
+    if (GEOMETRY_TAGS.has(tTag)) {
+      ok = isRenderableShape(target, idMap, visitedIds);
+    } else if (tTag === "g" || tTag === "symbol") {
+      ok = collectElements(target).some(
+        (child) =>
+          GEOMETRY_TAGS.has(child.tagName.toLowerCase()) &&
+          isRenderableShape(child, idMap, visitedIds),
+      );
+    }
+    visitedIds.delete(targetId);
+    return ok;
+  }
+  return false;
+}
+
+function hasDisallowedCssResource(cssText: string): string | null {
+  const withoutComments = cssText.replace(/\/\*[\s\S]*?\*\//g, "");
+  if (/@import\b/i.test(withoutComments)) {
+    return "Disallowed CSS @import external stylesheet found.";
+  }
+  const urlRegex = /url\(\s*(['"]?)([^)'"]+)\1\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = urlRegex.exec(withoutComments)) !== null) {
+    const target = m[2].trim();
+    if (!target.startsWith("#")) {
+      return `Disallowed external/non-fragment CSS url("${target}") found.`;
+    }
+  }
+  return null;
 }
 
 function checkSafeAndSubstantial(svgEl: Element): {
@@ -866,6 +1296,11 @@ function checkSafeAndSubstantial(svgEl: Element): {
   message: string;
 } {
   const allElements = collectElements(svgEl);
+  const idMap = new Map<string, Element>();
+  for (const el of allElements) {
+    const id = el.getAttribute("id");
+    if (id) idMap.set(id, el);
+  }
 
   for (const el of allElements) {
     const tag = el.tagName.toLowerCase();
@@ -874,6 +1309,11 @@ function checkSafeAndSubstantial(svgEl: Element): {
         passed: false,
         message: `Disallowed <${tag}> element found in SVG.`,
       };
+    }
+
+    if (tag === "style") {
+      const cssIssue = hasDisallowedCssResource(el.textContent ?? "");
+      if (cssIssue) return { passed: false, message: cssIssue };
     }
 
     for (let i = 0; i < el.attributes.length; i++) {
@@ -886,6 +1326,11 @@ function checkSafeAndSubstantial(svgEl: Element): {
           passed: false,
           message: `Disallowed event handler attribute "${attr.name}" on <${tag}>.`,
         };
+      }
+
+      if (name === "style") {
+        const inlineIssue = hasDisallowedCssResource(value);
+        if (inlineIssue) return { passed: false, message: inlineIssue };
       }
 
       if (
@@ -906,7 +1351,9 @@ function checkSafeAndSubstantial(svgEl: Element): {
     const el = node as Element;
     const tag = el.tagName.toLowerCase();
     if (SKIPPED_CONTAINERS.has(tag)) return;
-    if (GEOMETRY_TAGS.has(tag) || tag === "use") shapeCount++;
+    if ((GEOMETRY_TAGS.has(tag) || tag === "use") && isRenderableShape(el, idMap)) {
+      shapeCount++;
+    }
     for (let i = 0; i < el.childNodes.length; i++) {
       countShapes(el.childNodes[i]);
     }
@@ -916,13 +1363,13 @@ function checkSafeAndSubstantial(svgEl: Element): {
   if (shapeCount < 3) {
     return {
       passed: false,
-      message: `Only ${shapeCount} geometric shape(s) found outside <defs>; expected at least 3 for a meaningful diagram.`,
+      message: `Only ${shapeCount} renderable geometric shape(s) found outside <defs>; expected at least 3 for a meaningful diagram.`,
     };
   }
 
   return {
     passed: true,
-    message: `Self-contained SVG with ${shapeCount} geometric shapes and no unsafe tags/URLs.`,
+    message: `Self-contained SVG with ${shapeCount} renderable shapes and no external assets or scripts.`,
   };
 }
 
@@ -975,7 +1422,11 @@ export function validateSvg(rawOutput: string): {
   const withoutCommentsOrCdata = extracted
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
-  if (/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/.test(withoutCommentsOrCdata)) {
+  if (
+    /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/.test(
+      withoutCommentsOrCdata,
+    )
+  ) {
     parseErrors.push(
       "Unescaped '&' found outside XML comments or CDATA; replace with '&amp;' or 'and'.",
     );
@@ -993,17 +1444,23 @@ export function validateSvg(rawOutput: string): {
   try {
     doc = parser.parseFromString(extracted, "image/svg+xml");
   } catch (err) {
-    parseErrors.push(err instanceof Error ? err.message : "XML parser threw an error");
+    parseErrors.push(
+      err instanceof Error ? err.message : "XML parser threw an error",
+    );
   }
 
   const root = doc?.documentElement;
-  const isValidRoot = Boolean(root && root.tagName.toLowerCase() === "svg");
+  const isValidRoot = Boolean(
+    root &&
+      (root.localName ?? root.tagName).toLowerCase() === "svg" &&
+      root.namespaceURI === SVG_NS,
+  );
 
   if (parseErrors.length > 0 || !isValidRoot || !root) {
     const reason =
       parseErrors.length > 0
         ? `XML parse error: ${parseErrors[0]}`
-        : "Root element is not <svg>.";
+        : `Root element must be <svg xmlns="${SVG_NS}">.`;
     const checks: CheckResult[] = [
       { id: "valid_svg", label: "Valid SVG", passed: false, message: reason },
       {
@@ -1036,7 +1493,7 @@ export function validateSvg(rawOutput: string): {
 
   const allElements = collectElements(root);
   const viewBoxRes = checkViewBox(root);
-  const labelsRes = checkTitleAndLabels(allElements);
+  const labelsRes = checkTitleAndLabels(root);
   const animRes = checkAnimation(allElements);
   const customRes = checkSafeAndSubstantial(root);
 

@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { CONCEPTS } from "@/data/concepts";
 import {
-  DEFAULT_MODEL,
   generateAndValidateDiagram,
+  getDefaultModel,
 } from "@/lib/diagram-generator";
 import type { DiagramResult, ResultsFile } from "@/lib/types";
 
@@ -16,7 +16,7 @@ async function sleep(ms: number): Promise<void> {
 }
 
 async function main() {
-  const model = DEFAULT_MODEL;
+  const model = getDefaultModel();
   console.info(
     `\nStarting diagram generation for ${CONCEPTS.length} concepts using model "${model}"...\n`,
   );
@@ -45,7 +45,19 @@ async function main() {
   };
 
   const outPath = path.join(process.cwd(), "results.json");
-  fs.writeFileSync(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf-8");
+  const tmpPath = path.join(
+    process.cwd(),
+    `.results.json.tmp.${process.pid}.${Date.now()}`,
+  );
+  try {
+    fs.writeFileSync(tmpPath, `${JSON.stringify(output, null, 2)}\n`, "utf-8");
+    fs.renameSync(tmpPath, outPath);
+  } catch (err) {
+    if (fs.existsSync(tmpPath)) {
+      fs.unlinkSync(tmpPath);
+    }
+    throw err;
+  }
 
   console.info(`\nSaved ${results.length} results to ${outPath}\n`);
   console.table(

@@ -232,4 +232,110 @@ describe("validateSvg", () => {
     const res = validateSvg(motionSvg);
     assert.equal(res.passedAll, true, JSON.stringify(res.checks));
   });
+
+  it("fails valid_svg when root namespace is not SVG", () => {
+    const wrongNs = `
+<svg xmlns="http://example.com/not-svg" viewBox="0 0 600 400">
+  <title>Wrong NS</title>
+  <rect x="20" y="20" width="80" height="80" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="2s" />
+</svg>`;
+    const res = validateSvg(wrongNs);
+    assert.equal(res.checks.find((c) => c.id === "valid_svg")?.passed, false);
+  });
+
+  it("fails safe_and_substantial on external CSS @import and zero-width shapes", () => {
+    const externalCss = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>External CSS</title>
+  <style>@import url('https://fonts.googleapis.com/css2?family=Inter');</style>
+  <rect x="20" y="20" width="80" height="80" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="2s" />
+</svg>`;
+    assert.equal(
+      validateSvg(externalCss).checks.find((c) => c.id === "safe_and_substantial")?.passed,
+      false,
+    );
+
+    const zeroShapes = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Degenerate</title>
+  <rect x="20" y="20" width="0" height="80" />
+  <circle cx="200" cy="200" r="0" />
+  <line x1="10" y1="10" x2="10" y2="10" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="2s" />
+</svg>`;
+    assert.equal(
+      validateSvg(zeroShapes).checks.find((c) => c.id === "safe_and_substantial")?.passed,
+      false,
+    );
+  });
+
+  it("fails within_viewbox when <animate> moves geometry outside viewBox or CSS 0s animation", () => {
+    const animOut = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Moving out</title>
+  <rect x="20" y="20" width="80" height="80" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <circle cx="150" cy="200" r="20">
+    <animate attributeName="cx" values="150;650;150" dur="2s" />
+  </circle>
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+</svg>`;
+    assert.equal(
+      validateSvg(animOut).checks.find((c) => c.id === "within_viewbox")?.passed,
+      false,
+    );
+
+    const zeroCssAnim = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+  <title>Zero CSS anim</title>
+  <style>.a { animation: fade 0s; } @keyframes fade { from { opacity: 0; } to { opacity: 1; } }</style>
+  <rect class="a" x="20" y="20" width="80" height="80" />
+  <circle cx="200" cy="200" r="20" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+</svg>`;
+    assert.equal(
+      validateSvg(zeroCssAnim).checks.find((c) => c.id === "has_animation")?.passed,
+      false,
+    );
+  });
+
+  it("extracts outer SVG when nested <svg> exists and handles xlink:href <use>", () => {
+    const nestedAndXlink = `
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 400">
+  <title>Nested &amp; XLink</title>
+  <defs>
+    <circle id="dot" cx="0" cy="0" r="10" />
+  </defs>
+  <svg x="50" y="50" width="100" height="100" viewBox="0 0 100 100">
+    <rect x="10" y="10" width="40" height="40" />
+  </svg>
+  <use xlink:href="#dot" x="200" y="200" />
+  <line x1="10" y1="10" x2="50" y2="50" />
+  <text x="100" y="100">One</text>
+  <text x="200" y="100">Two</text>
+  <text x="300" y="100">Three</text>
+  <animate attributeName="opacity" values="1;0.5;1" dur="2s" />
+</svg>`;
+    assert.equal(validateSvg(nestedAndXlink).passedAll, true);
+  });
 });

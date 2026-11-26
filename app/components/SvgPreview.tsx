@@ -29,7 +29,18 @@ function sanitizeSvgForPreview(rawSvg: string): string {
       .querySelectorAll("script, foreignObject, foreignobject")
       .forEach((node) => node.remove());
 
-    svgEl.querySelectorAll("*").forEach((el) => {
+    svgEl.querySelectorAll("style").forEach((styleNode) => {
+      if (styleNode.textContent) {
+        styleNode.textContent = styleNode.textContent
+          .replace(/@import\b[^;]*(?:;|$)/gi, "")
+          .replace(
+            /url\(\s*(['"]?)\s*(?:https?:|\/\/|javascript:)[^)]*\1\s*\)/gi,
+            "none",
+          );
+      }
+    });
+
+    [svgEl, ...Array.from(svgEl.querySelectorAll("*"))].forEach((el) => {
       for (const attr of Array.from(el.attributes)) {
         const name = attr.name.toLowerCase();
         const val = attr.value.trim();
@@ -40,6 +51,17 @@ function sanitizeSvgForPreview(rawSvg: string): string {
           /^(?:https?:|\/\/|javascript:)/i.test(val)
         ) {
           el.removeAttribute(attr.name);
+        } else if (
+          name === "style" &&
+          /url\(\s*(['"]?)\s*(?:https?:|\/\/|javascript:)/i.test(val)
+        ) {
+          el.setAttribute(
+            attr.name,
+            val.replace(
+              /url\(\s*(['"]?)\s*(?:https?:|\/\/|javascript:)[^)]*\1\s*\)/gi,
+              "none",
+            ),
+          );
         }
       }
     });
