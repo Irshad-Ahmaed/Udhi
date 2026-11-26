@@ -1,0 +1,31 @@
+{
+  "name": "science-diagram-maker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "tsc --noEmit",
+    "test": "tsx --test lib/svg-validator.test.ts",
+    "generate": "tsx scripts/generate-all.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@xmldom/xmldom": "^0.8.10",
+    "dotenv": "^16.4.7",
+    "next": "^15.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "svg-path-parser": "^1.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
